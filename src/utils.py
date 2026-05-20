@@ -5,11 +5,15 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import wandb
-from torchmetrics.image import PeakSignalNoiseRatio
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 class PipelineHelpers:
     def __init__(self, device: str = "cuda"):
         self.psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
+        self.ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+        self.lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
+        
         self.cmap = plt.get_cmap("turbo")
         self.start_time = time.time()
 
@@ -33,12 +37,17 @@ class PipelineHelpers:
         pred_bchw = pred_img.permute(2, 0, 1).unsqueeze(0).clamp(0.0, 1.0)
         gt_bchw = gt_img.permute(2, 0, 1).unsqueeze(0).clamp(0.0, 1.0)
         
+        # Performance evaluation benchmarks run purely against target true scans
         psnr_val = self.psnr_metric(pred_bchw, gt_bchw).item()
+        ssim_val = self.ssim_metric(pred_bchw, gt_bchw).item()
+        lpips_val = self.lpips_metric(pred_bchw, gt_bchw).item()
         mem_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
         elapsed_min = (time.time() - self.start_time) / 60.0
         
         metrics = {
             "metrics/psnr": psnr_val,
+            "metrics/ssim": ssim_val,
+            "metrics/lpips": lpips_val,
             "metrics/num_gaussians": num_gs,
             "metrics/vram_gb": mem_gb,
             "metrics/time_minutes": elapsed_min

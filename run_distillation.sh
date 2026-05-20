@@ -12,5 +12,5 @@ python train_dist.py \
     --version "$VERSION" \
     --data_dir "$DATA_PATH" \
     --warmup_version "v1" \
-    --lambda_distill_rgb 1.0 \
-    --lambda_distill_depth 0.5
+    --lambda_distill_rgb 0.7 \
+    --lambda_distill_depth 0.3

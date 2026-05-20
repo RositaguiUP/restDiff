@@ -1,15 +1,15 @@
 import os
-import time
 import argparse
+import random
 import torch
-import wandb
 import numpy as np
 from tqdm import tqdm
+import wandb
 
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy
 
-from src.config import PipelineConfig, OptimizerConfig
+from src.config import PipelineConfig
 from src.dataset import CustomGSDataset
 from src.losses import LossEngine
 from src.model import create_splats_with_optimizers
@@ -31,6 +31,7 @@ def run_warmup():
     # DETERMINISTIC ORDERING: Ensures same camera idx sequence per run
     torch.manual_seed(42)
     np.random.seed(42)
+    random.seed(42)
     
     args = parse_args()
     
@@ -47,8 +48,7 @@ def run_warmup():
     stage = "warmup"
     base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}"
     ckpt_dir = os.path.join(base_dir, "checkpoints")
-    wandb_dir = os.path.join(base_dir, "wandb")
-    os.makedirs(wandb_dir, exist_ok=True)
+    os.makedirs(base_dir, exist_ok=True)
     
     # 1. Setup Dataset, Losses, and Helpers
     dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device)
@@ -65,12 +65,11 @@ def run_warmup():
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=0.01 ** (1.0 / cfg.max_steps_warmup))
 
     # Project and Run Naming integration
-    run_id = f"{cfg.version}-{time.strftime('%Y%m%d_%H%M%S')}"
+    name = f"{cfg.scene_name}-{cfg.version}"
     wandb.init(
         project="thesis-gsplat-warmup",
-        name=f"{cfg.scene_name}-{cfg.version}",
-        id=run_id,
-        dir=wandb_dir,
+        name=name,
+        dir=base_dir,
         config=cfg.to_dict() # Auto-populates Wandb Config UI
     )
     
@@ -122,12 +121,13 @@ def run_warmup():
         )
         
         # Calculate Losses
-        gs_loss = losses.compute_official_gs_losses(pred_img, gt_img)
-        rgb_loss = cfg.lambda_warmup_rgb * gs_loss
+        gs_loss = losses.compute_official_gs_losses(pred_img, gt_img, cfg.lambda_distill_ssim)
+        depth_loss = losses.compute_pearson_depth_loss(pred_depth, gt_depth)
         
-        depth_loss = cfg.lambda_warmup_depth * losses.compute_pearson_depth_loss(pred_depth, gt_depth)
+        rgb_weighted = cfg.lambda_warmup_rgb * gs_loss
+        depth_weighted = cfg.lambda_warmup_depth * depth_loss
         
-        total_loss = rgb_loss + depth_loss
+        total_loss = rgb_weighted + depth_weighted
         total_loss.backward()
 
         # Optimization & Densification Steps
@@ -144,8 +144,8 @@ def run_warmup():
 
         # Logging
         if step % cfg.log_interval == 0:
-            helpers.log_telemetry(step, total_loss.item(), rgb_loss.item(), depth_loss.item(), pred_img, gt_img, len(splats["means"]), extra_losses={
-                "losses/loss_depth": depth_loss.item()
+            helpers.log_telemetry(step, total_loss.item(), rgb_weighted.item(), depth_weighted.item(), pred_img, gt_img, len(splats["means"]), extra_losses={
+                "losses/loss_depth": depth_weighted.item()
             })
             
         if step % cfg.vis_interval == 0:

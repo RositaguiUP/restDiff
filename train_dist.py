@@ -1,12 +1,10 @@
 import os
-import time
 import argparse
+import random
 import torch
 import numpy as np
 from tqdm import tqdm
 import wandb
-import torch.nn.functional as F
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy
@@ -33,6 +31,7 @@ def run_distillation():
     # DETERMINISTIC ORDERING
     torch.manual_seed(42)
     np.random.seed(42)
+    random.seed(42)
     
     args = parse_args()
     cfg = PipelineConfig(
@@ -48,15 +47,13 @@ def run_distillation():
     stage = "distill"
     base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}"
     ckpt_dir = os.path.join(base_dir, "checkpoints")
-    wandb_dir = os.path.join(base_dir, "wandb")
-    os.makedirs(wandb_dir, exist_ok=True)
+    os.makedirs(base_dir, exist_ok=True)
     
     # 1. Setup Dataset, Losses, Helpers and Metrics
     dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device)
     losses = LossEngine(device=cfg.device)
     helpers = PipelineHelpers(device=cfg.device)
-    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(cfg.device)
-    
+        
     # 2. Setup Splats & Strategy
     splats, optimizers = create_splats_with_optimizers(
         ply_path=os.path.join(cfg.data_dir, "pointcloud.ply"), cfg=cfg.opts, device=cfg.device, sh_degree=cfg.sh_degree
@@ -81,12 +78,11 @@ def run_distillation():
     target_end_step = start_step + cfg.max_steps_distill
     
     # Project and Run Naming integration
-    run_id = f"{cfg.version}-{time.strftime('%Y%m%d_%H%M%S')}"
+    name = f"{cfg.scene_name}-{cfg.version}"
     wandb.init(
         project="thesis-gsplat-distillation",
-        name=f"{cfg.scene_name}-{cfg.version}",
-        id=run_id,
-        dir=wandb_dir,
+        name=name,
+        dir=base_dir,
         config=cfg.to_dict()
     )
     
@@ -105,6 +101,9 @@ def run_distillation():
         scales = torch.exp(splats["scales"])
         opacities = torch.sigmoid(splats["opacities"])
         
+        # Rasterization (gsplat expects World-to-Camera viewmats)
+        viewmats = torch.linalg.inv(c2w)
+        
         # Render (Asking for RGB + Expected Depth)
         render_colors, _, info = rasterization(
             means=splats["means"],
@@ -112,7 +111,7 @@ def run_distillation():
             scales=scales,
             opacities=opacities,
             colors=colors_sh,
-            viewmats=torch.linalg.inv(c2w),
+            viewmats=viewmats,
             Ks=K,
             width=dataset.W,
             height=dataset.H,
@@ -122,16 +121,19 @@ def run_distillation():
             render_mode="RGB+ED" 
         )
         
-        pred_img = render_colors.squeeze(0)[..., :3]
-        pred_depth = render_colors.squeeze(0)[..., 3]
+        rendered = render_colors.squeeze(0)  # Shape becomes [H, W, 4]
+        pred_img = rendered[..., :3]  # Channels 0, 1, 2 (RGB)
+        pred_depth = rendered[..., 3]  # Channel 3 (Expected Projection Depth)
         
         strategy.step_pre_backward(params=splats, optimizers=optimizers, state=strategy_state, step=step, info=info)
         
         # --- A. ANCHOR LOSSES (Geometry & Physical) ---
-        gs_loss = losses.compute_official_gs_losses(pred_img, gt_img)
-        rgb_loss = cfg.lambda_warmup_rgb * gs_loss
+        gs_loss = losses.compute_official_gs_losses(pred_img, gt_img, lambda_ssim=cfg.lambda_ssim)
+        depth_loss = losses.compute_pearson_depth_loss(pred_depth, gt_depth)
         
-        depth_loss = cfg.lambda_warmup_depth * losses.compute_pearson_depth_loss(pred_depth, gt_depth)
+        rgb_weighted = cfg.lambda_distill_rgb * gs_loss
+        depth_weighted = cfg.lambda_distill_depth * depth_loss
+        
         
         # --- B. DISTILLATION PASS (Diffusion) ---
         # Generate the Perfect Pseudo-GT using ControlNet
@@ -143,20 +145,12 @@ def run_distillation():
             current_step_ratio=step_ratio
         )
         
-        # Compute Distillation Losses
-        pred_img_bchw = pred_img.permute(2, 0, 1).unsqueeze(0)
-        pseudo_gt_bchw = pseudo_gt.permute(2, 0, 1).unsqueeze(0)
+        # Consolidation of generative structural & perceptual guidance terms via losses.py
+        loss_mse, loss_lpips = losses.compute_distillation_losses(pred_img, pseudo_gt)
+        mse_weighted = cfg.lambda_distill_mse * loss_mse
+        lpips_weighted = cfg.lambda_distill_lpips * loss_lpips
         
-        # Clamp the 3DGS render to safely remove SH evaluation outliers
-        pred_img_bchw_clamped = torch.clamp(pred_img_bchw, 0.0, 1.0)
-
-        # pseudo_gt is already clamped by the diffusion pipeline, but we clamp it here to be absolutely safe
-        pseudo_gt_bchw_clamped = torch.clamp(pseudo_gt_bchw, 0.0, 1.0)
-
-        loss_mse = cfg.lambda_distill_mse * F.mse_loss(pred_img_bchw_clamped, pseudo_gt_bchw_clamped)
-        loss_lpips = cfg.lambda_distill_lpips * lpips_metric(pred_img_bchw_clamped, pseudo_gt_bchw_clamped).mean()
-        
-        total_loss = rgb_loss + depth_loss + loss_mse + loss_lpips
+        total_loss = rgb_weighted + depth_weighted + mse_weighted + lpips_weighted
         total_loss.backward()
 
         for opt in optimizers.values():
@@ -167,9 +161,9 @@ def run_distillation():
 
         # Logging
         if step % cfg.log_interval == 0:
-            helpers.log_telemetry(step, total_loss.item(), rgb_loss.item(), depth_loss.item(), pred_img, gt_img, len(splats["means"]), extra_losses={
-                "losses/loss_distill_mse": loss_mse.item(),
-                "losses/loss_distill_lpips": loss_lpips.item()
+            helpers.log_telemetry(step, total_loss.item(), rgb_weighted.item(), depth_weighted.item(), pred_img, gt_img, len(splats["means"]), extra_losses={
+                "losses/loss_distill_mse": mse_weighted.item(),
+                "losses/loss_distill_lpips": lpips_weighted.item()
             })
             
         if step % cfg.vis_interval == 0:
@@ -178,11 +172,10 @@ def run_distillation():
                         
         
         if step > start_step and step % cfg.ckpt_interval == 0:
-            helpers.save_checkpoint(splats, optimizers, strategy_state, step, os.path.join(cfg.data_dir, "checkpoints_distilled"), "distill")
+            helpers.save_checkpoint(splats, optimizers, strategy_state, step, ckpt_dir, "distill", preserve_steps)
 
-    # --- NEW: Final Checkpoint Saving ---
     print("\n[INFO] Distillation complete. Saving final state...")
-    helpers.save_checkpoint(splats, optimizers, strategy_state, target_end_step, os.path.join(cfg.data_dir, "checkpoints_distilled"), "distill")
+    helpers.save_checkpoint(splats, optimizers, strategy_state, target_end_step, ckpt_dir, "distill", preserve_steps)
     wandb.finish()
 
 if __name__ == "__main__":
