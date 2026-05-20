@@ -7,40 +7,36 @@ from diffusers import (
     DDIMScheduler
 )
 
+from src.config import GuidanceConfig
+
 class StableDiffusionControlNetGuidance(nn.Module):
-    def __init__(self, device="cuda"):
+    def __init__(self, cfg: GuidanceConfig, device: str = "cuda"):
         super().__init__()
+        self.cfg = cfg
         self.device = device
         self.weights_dtype = torch.float16 # FP16 for VRAM efficiency
 
-        # Hyperparameters (Adjusted from your config)
-        self.sd_path = "stable-diffusion-v1-5/stable-diffusion-v1-5"
-        self.tile_path = "lllyasviel/control_v11f1e_sd15_tile"
-        self.depth_path = "lllyasviel/control_v11f1p_sd15_depth"
+        controlnet_tile = ControlNetModel.from_pretrained(cfg.tile_path, torch_dtype=self.weights_dtype)
+        controlnet_depth = ControlNetModel.from_pretrained(cfg.depth_path, torch_dtype=self.weights_dtype)
         
-        self.guidance_scale = 7.5
-        self.controlnet_scales = [0.95, 0.5] # [Tile, Depth]
-        self.ip_adapter_scale = 0.0
-        self.num_steps_sample = 20
-        self.min_step_percent = 0.25
-        self.max_step_percent = 0.85
 
         print("[INFO] Loading ControlNets (Tile + Depth)...")
-        controlnet_tile = ControlNetModel.from_pretrained(self.tile_path, torch_dtype=self.weights_dtype)
-        controlnet_depth = ControlNetModel.from_pretrained(self.depth_path, torch_dtype=self.weights_dtype)
+        controlnet_tile = ControlNetModel.from_pretrained(cfg.tile_path, torch_dtype=self.weights_dtype)
+        controlnet_depth = ControlNetModel.from_pretrained(cfg.depth_path, torch_dtype=self.weights_dtype)
         
         print("[INFO] Loading Stable Diffusion Pipeline...")
         self.pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-            self.sd_path,
+            cfg.sd_path,
             controlnet=[controlnet_tile, controlnet_depth],
             torch_dtype=self.weights_dtype,
             safety_checker=None,
         ).to(self.device)
         
+        # if cfg.ip_adapter_scale > 0.0:
         print("[INFO] Loading IP-Adapter...")
         self.pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin")
-        self.pipe.set_ip_adapter_scale(self.ip_adapter_scale)
-
+        self.pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
+        
         # Optimizations
         self.pipe.enable_xformers_memory_efficient_attention()
         self.scheduler = DDIMScheduler.from_config(self.pipe.scheduler.config)
@@ -48,11 +44,11 @@ class StableDiffusionControlNetGuidance(nn.Module):
         self.pipe.set_progress_bar_config(disable=True)
         
         self.num_train_timesteps = self.scheduler.config.num_train_timesteps
-        self.min_step = int(self.num_train_timesteps * self.min_step_percent)
-        self.max_step = int(self.num_train_timesteps * self.max_step_percent)
+        self.min_step = int(self.num_train_timesteps * cfg.min_step_percent)
+        self.max_step = int(self.num_train_timesteps * cfg.max_step_percent)
 
     @torch.no_grad()
-    def multi_step(self, rgb, scan_rgb, scan_depth, prompt, current_step_ratio):
+    def multi_step(self, rgb: torch.Tensor, scan_rgb: torch.Tensor, scan_depth: torch.Tensor, prompt: str, current_step_ratio: float):
         """
         rgb: [H, W, 3] Sharp 3DGS Render
         scan_rgb: [H, W, 3] Blurry GT Scan
@@ -60,9 +56,9 @@ class StableDiffusionControlNetGuidance(nn.Module):
         """
         # 1. Format Inputs to [B, C, H, W]
         rgb_BCHW = rgb.permute(2, 0, 1).unsqueeze(0).clamp(0, 1)
-        original_h, original_w = rgb_BCHW.shape[2:]
-        
+        orig_h, orig_w = rgb_BCHW.shape[2:]
         rgb_512 = F.interpolate(rgb_BCHW, (512, 512), mode="bilinear", align_corners=False)
+        
         
         # Tile ControlNet & IP-Adapter (Uses original scan RGB)
         ctrl_tile = scan_rgb.permute(2, 0, 1).unsqueeze(0).clamp(0, 1)
@@ -89,13 +85,13 @@ class StableDiffusionControlNetGuidance(nn.Module):
             image=rgb_512.to(self.weights_dtype), 
             control_image=[ctrl_tile_512.to(self.weights_dtype), ctrl_depth_512.to(self.weights_dtype)],
             ip_adapter_image=ip_adapter_input,
-            controlnet_conditioning_scale=self.controlnet_scales,
+            controlnet_conditioning_scale=self.cfg.controlnet_scales,
             strength=strength,
-            num_inference_steps=self.num_steps_sample,
-            guidance_scale=self.guidance_scale,
+            num_inference_steps=self.cfg.num_steps_sample,
+            guidance_scale=self.cfg.guidance_scale,
             output_type="pt"
         ).images
 
         # Return to original resolution [H, W, 3]
-        pseudo_gt_sharp = F.interpolate(out_images, (original_h, original_w), mode="bilinear", align_corners=False)
-        return pseudo_gt_sharp.squeeze(0).permute(1, 2, 0).clamp(0, 1).to(torch.float32)
+        pseudo_gt = F.interpolate(out_images, (orig_h, orig_w), mode="bilinear", align_corners=False)
+        return pseudo_gt.squeeze(0).permute(1, 2, 0).clamp(0, 1).to(torch.float32)

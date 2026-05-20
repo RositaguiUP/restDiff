@@ -1,10 +1,11 @@
 import os
 import torch
-import math
 import numpy as np
+from plyfile import PlyData
 from torch import Tensor
 from sklearn.neighbors import NearestNeighbors
 
+from src.config import OptimizerConfig
 
 def rgb_to_sh(rgb: torch.Tensor) -> torch.Tensor:
     """Converts RGB to Spherical Harmonics (SH) DC component."""
@@ -17,12 +18,11 @@ def knn(x: Tensor, K: int = 4) -> Tensor:
     distances, _ = model.kneighbors(x_np)
     return torch.from_numpy(distances).to(x)
 
-def create_splats_with_optimizers(ply_path, num_random_pts=100000, sh_degree=3, device="cuda"):
+def create_splats_with_optimizers(ply_path: str, cfg: OptimizerConfig, device: str = "cuda", sh_degree: int = 3, num_random_pts: int = 100000):
     """Initializes GS parameters and Adam optimizers mirroring simple_trainer.py"""
     
     # 1. Load Point Cloud
     if os.path.exists(ply_path):
-        from plyfile import PlyData
         plydata = PlyData.read(ply_path)
         v = plydata['vertex']
         points = np.vstack([v['x'], v['y'], v['z']]).T
@@ -66,12 +66,12 @@ def create_splats_with_optimizers(ply_path, num_random_pts=100000, sh_degree=3, 
 
     # 5. Optimizers Setup
     params_groups = [
-        ("means", splats["means"], 1.6e-4),
-        ("scales", splats["scales"], 5e-3),
-        ("quats", splats["quats"], 1e-3),
-        ("opacities", splats["opacities"], 5e-2),
-        ("sh0", splats["sh0"], 2.5e-3),
-        ("shN", splats["shN"], 2.5e-3 / 20),
+        ("means", splats["means"], cfg.lr_means),
+        ("scales", splats["scales"], cfg.lr_scales),
+        ("quats", splats["quats"], cfg.lr_quats),
+        ("opacities", splats["opacities"], cfg.lr_opacities),
+        ("sh0", splats["sh0"], cfg.lr_sh0),
+        ("shN", splats["shN"], cfg.lr_shN),
     ]
 
     optimizers = {

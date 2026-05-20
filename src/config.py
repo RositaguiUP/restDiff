@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import List
 
 @dataclass
@@ -24,22 +24,27 @@ class GuidanceConfig:
 
 @dataclass
 class PipelineConfig:
-    # Environment Setup
+    # Project Identity
+    scene_name: str = "my_scene"
+    version: str = "v1"
     data_dir: str = "data/my_scene"
     device: str = "cuda"
     sh_degree: int = 3
     
+    warmup_version: str = "v1"
+    
     # Execution Budgets
     max_steps_warmup: int = 30000
     max_steps_distill: int = 15000
-    ckpt_interval: int = 5000
+    ckpt_interval: int = 2500
     log_interval: int = 50
     vis_interval: int = 500
     
     # Loss Optimization Coefficients
-    lambda_warmup_l1: float = 0.8
-    lambda_warmup_ssim: float = 0.2
-    lambda_warmup_depth: float = 5.0
+    lambda_ssim: float = 0.2
+    
+    lambda_warmup_rgb: float = 1.0
+    lambda_warmup_depth: float = 0.5
     
     lambda_distill_l1: float = 0.5
     lambda_distill_ssim: float = 0.2
@@ -50,3 +55,7 @@ class PipelineConfig:
     # Embedded Sub-configs
     opts: OptimizerConfig = field(default_factory=OptimizerConfig)
     guidance: GuidanceConfig = field(default_factory=GuidanceConfig)
+    
+    def to_dict(self):
+            """Converts dataclass to dict for WandB auto-logging"""
+            return asdict(self)
