@@ -7,11 +7,11 @@ from tqdm import tqdm
 import wandb
 
 from gsplat.rendering import rasterization
-from gsplat.strategy import DefaultStrategy
+from gsplat.strategy import DefaultStrategy, MCMCStrategy
 
 from src.config import PipelineConfig
 from src.dataset import CustomGSDataset
-from src.losses import LossEngine
+from src.losses import LossEngine, DynamicLossScheduler
 from src.model import create_splats_with_optimizers
 from src.utils import PipelineHelpers
 
@@ -20,8 +20,11 @@ def parse_args():
     parser.add_argument("--scene_name", type=str, required=True)
     parser.add_argument("--version", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--lambda_warmup_rgb", type=float, default=1.0)
-    parser.add_argument("--lambda_warmup_depth", type=float, default=5.0)
+    parser.add_argument("--strategy_type", type=str, default="default", choices=["default", "mcmc"])
+    parser.add_argument("--depth_start", type=float, default=0.3)
+    parser.add_argument("--depth_end", type=float, default=0.02)
+    parser.add_argument("--hold_steps", type=int, default=10000)
+    parser.add_argument("--decay_steps", type=int, default=15000)
     return parser.parse_args()
     
 def run_warmup():
@@ -35,14 +38,21 @@ def run_warmup():
     
     args = parse_args()
     
-    # Instantiate parsed property instances
+    # Setup configs
     cfg = PipelineConfig(
         scene_name=args.scene_name,
         version=args.version,
         data_dir=args.data_dir,
-        lambda_warmup_rgb=args.lambda_warmup_rgb,
-        lambda_warmup_depth=args.lambda_warmup_depth
+        strategy_type=args.strategy_type,
     )
+    
+    # Override schedule config with CLI args
+    cfg.schedule.depth_start = args.depth_start
+    cfg.schedule.depth_end = args.depth_end
+    cfg.schedule.rgb_start = 1.0 - args.depth_start
+    cfg.schedule.rgb_end = 1.0 - args.depth_end
+    cfg.schedule.hold_steps = args.hold_steps
+    cfg.schedule.decay_steps = args.decay_steps
     
     # Dynamic Directories
     stage = "warmup"
@@ -53,15 +63,25 @@ def run_warmup():
     # 1. Setup Dataset, Losses, and Helpers
     dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device)
     losses = LossEngine(device=cfg.device)
+    loss_scheduler = DynamicLossScheduler(cfg.schedule)
     helpers = PipelineHelpers(device=cfg.device)
     
     # 2. Setup Splats & Strategy ( Densification logic )
     splats, optimizers = create_splats_with_optimizers(
-        ply_path=os.path.join(cfg.data_dir, "pointcloud.ply"), cfg=cfg.opts, device=cfg.device, sh_degree=cfg.sh_degree
+        ply_path=os.path.join(cfg.data_dir, "pointcloud.ply"), cfg=cfg, device=cfg.device, sh_degree=cfg.sh_degree
     )
     
-    strategy = DefaultStrategy(verbose=True)
-    strategy_state = strategy.initialize_state(scene_scale=1.0)
+    if cfg.strategy_type == "mcmc":
+        strategy = MCMCStrategy(verbose=True)
+        strategy.init_opa = cfg.init_opa
+        strategy.init_scale = cfg.init_scale
+        strategy.opacity_reg = cfg.opacity_reg
+        strategy.scale_reg = cfg.scale_reg
+        strategy_state = strategy.initialize_state()
+    else:
+        strategy = DefaultStrategy(verbose=True)
+        strategy_state = strategy.initialize_state(scene_scale=1.0)
+        
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=0.01 ** (1.0 / cfg.max_steps_warmup))
 
     # Project and Run Naming integration
@@ -107,7 +127,11 @@ def run_warmup():
             height=dataset.H,
             sh_degree=sh_degree_to_use,
             packed=False,
-            absgrad=strategy.absgrad,
+            absgrad=(
+                strategy.absgrad
+                if cfg.strategy_type == "default"
+                else False
+            ),
             render_mode="RGB+ED"
         )
         
@@ -121,31 +145,57 @@ def run_warmup():
         )
         
         # Calculate Losses
-        gs_loss = losses.compute_official_gs_losses(pred_img, gt_img, cfg.lambda_distill_ssim)
+        gs_loss = losses.compute_official_gs_losses(pred_img, gt_img)
         depth_loss = losses.compute_pearson_depth_loss(pred_depth, gt_depth)
         
-        rgb_weighted = cfg.lambda_warmup_rgb * gs_loss
-        depth_weighted = cfg.lambda_warmup_depth * depth_loss
+        # Get dynamic weights for this specific step
+        current_w_rgb, current_w_depth = loss_scheduler.get_weights(step)
         
+        rgb_weighted = current_w_rgb * gs_loss
+        depth_weighted = current_w_depth * depth_loss
         total_loss = rgb_weighted + depth_weighted
+        
+        # --- MCMC Regularization ---
+        if cfg.strategy_type == "mcmc":
+            # Scale the penalty by the total magnitude of your custom losses
+            loss_multiplier = current_w_rgb + current_w_depth
+            
+            if cfg.opacity_reg > 0.0:
+                total_loss += (cfg.opacity_reg * loss_multiplier) * torch.sigmoid(splats["opacities"]).mean()
+            if cfg.scale_reg > 0.0:
+                total_loss += (cfg.scale_reg * loss_multiplier) * torch.exp(splats["scales"]).mean()
+
         total_loss.backward()
 
         # Optimization & Densification Steps
         for opt in optimizers.values():
             opt.step()
             opt.zero_grad(set_to_none=True)
-            
+        
+        current_lr = scheduler.get_last_lr()[0]
         scheduler.step()
         
-        # --- Post-Backward Strategy Step ---
-        strategy.step_post_backward(
-            params=splats, optimizers=optimizers, state=strategy_state, step=step, info=info, packed=False
-        )
+        # --- Post-Backward Dynamic Strategy Stepping ---
+        scene_scale = 1.0
+        if len(splats["means"]) > 0:
+            scene_scale = torch.max(
+                splats["means"].max(dim=0).values - splats["means"].min(dim=0).values
+            ).item()
+
+        if cfg.strategy_type == "mcmc":
+            strategy = MCMCStrategy(verbose=True)
+            strategy_state = strategy.initialize_state()
+        else:
+            strategy = DefaultStrategy(verbose=True)
+            strategy_state = strategy.initialize_state(scene_scale=scene_scale)
 
         # Logging
         if step % cfg.log_interval == 0:
             helpers.log_telemetry(step, total_loss.item(), rgb_weighted.item(), depth_weighted.item(), pred_img, gt_img, len(splats["means"]), extra_losses={
-                "losses/loss_depth": depth_weighted.item()
+                "losses/loss_depth": depth_weighted.item(),
+                "losses/loss_depth_raw": depth_loss.item(),
+                "weights/lambda_rgb": current_w_rgb,
+                "weights/lambda_depth": current_w_depth
             })
             
         if step % cfg.vis_interval == 0:

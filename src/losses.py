@@ -3,6 +3,30 @@ import torch.nn.functional as F
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+class DynamicLossScheduler:
+    def __init__(self, schedule_cfg):
+        self.cfg = schedule_cfg
+
+    def get_weights(self, current_step: int):
+        """
+        Returns the (rgb_weight, depth_weight) for the current step.
+        """
+        # Phase 1: Hold initial weights
+        if current_step <= self.cfg.hold_steps:
+            return self.cfg.rgb_start, self.cfg.depth_start
+            
+        # Phase 3: Hold final weights after decay is finished
+        if current_step >= (self.cfg.hold_steps + self.cfg.decay_steps):
+            return self.cfg.rgb_end, self.cfg.depth_end
+            
+        # Phase 2: Linear interpolation between start and end
+        progress = (current_step - self.cfg.hold_steps) / self.cfg.decay_steps
+        
+        current_depth = self.cfg.depth_start + progress * (self.cfg.depth_end - self.cfg.depth_start)
+        current_rgb = self.cfg.rgb_start + progress * (self.cfg.rgb_end - self.cfg.rgb_start)
+        
+        return current_rgb, current_depth
+
 class LossEngine:
     def __init__(self, device: str = "cuda"):
         self.ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)

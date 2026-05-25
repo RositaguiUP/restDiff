@@ -9,6 +9,21 @@ class OptimizerConfig:
     lr_opacities: float = 5e-2
     lr_sh0: float = 2.5e-3
     lr_shN: float = 1.25e-4 # 2.5e-3 / 20
+    
+@dataclass
+class ScheduleConfig:
+    # How long to keep the initial weights before decaying
+    hold_steps: int = 10000 
+    # How many steps it takes to reach the final weights
+    decay_steps: int = 20000 
+    
+    # Starting weights (Phase 1: Geometry Focus)
+    depth_start: float = 0.3
+    rgb_start: float = 0.7
+    
+    # Ending weights (Phase 2: Texture Focus)
+    depth_end: float = 0.02
+    rgb_end: float = 0.98
 
 @dataclass
 class GuidanceConfig:
@@ -16,11 +31,11 @@ class GuidanceConfig:
     tile_path: str = "lllyasviel/control_v11f1e_sd15_tile"
     depth_path: str = "lllyasviel/control_v11f1p_sd15_depth"
     guidance_scale: float = 7.5
-    controlnet_scales: List[float] = field(default_factory=lambda: [0.5, 1.0])
+    controlnet_scales: List[float] = field(default_factory=lambda: [0.85, 1.0])
     ip_adapter_scale: float = 0.5
     num_steps_sample: int = 20
-    min_step_percent: float = 0.25
-    max_step_percent: float = 0.98
+    min_step_percent: float = 0.05
+    max_step_percent: float = 0.4
 
 @dataclass
 class PipelineConfig:
@@ -37,24 +52,37 @@ class PipelineConfig:
     max_steps_warmup: int = 30000
     max_steps_distill: int = 15000
     ckpt_interval: int = 2500
-    log_interval: int = 50
+    log_interval: int = 500
     vis_interval: int = 500
+    
+    # --- NEW: Densification Strategy ---
+    strategy_type: str = "default" # "default" or "mcmc"
+    init_opa: float = 0.1
+    init_scale: float = 1.0
+    opacity_reg: float = 0.0
+    scale_reg: float = 0.0
     
     # Loss Optimization Coefficients
     lambda_ssim: float = 0.2
     
-    lambda_warmup_rgb: float = 1.0
-    lambda_warmup_depth: float = 0.5
-    
-    lambda_distill_l1: float = 0.5
-    lambda_distill_ssim: float = 0.2
-    lambda_distill_depth: float = 10.0
-    lambda_distill_mse: float = 100.0
-    lambda_distill_lpips: float = 10.0
+    # EXPERT FIX: Updated Distillation Weights
+    lambda_distill_rgb: float = 15.0     # Very low: Stop fighting the deblurring process
+    lambda_distill_depth: float = 3.0   # High: Trust the LiDAR constraints
+    lambda_distill_mse: float = 1.0     # Baseline pixel matching
+    lambda_distill_lpips: float = 1.25   # High: Force photorealistic, sharp textures
     
     # Embedded Sub-configs
     opts: OptimizerConfig = field(default_factory=OptimizerConfig)
     guidance: GuidanceConfig = field(default_factory=GuidanceConfig)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    
+    def __post_init__(self):
+        """Automatically apply paper hyper-parameters if MCMC is selected"""
+        if self.strategy_type == "mcmc":
+            self.init_opa = 0.5
+            self.init_scale = 0.1
+            self.opacity_reg = 0.01
+            self.scale_reg = 0.01
     
     def to_dict(self):
             """Converts dataclass to dict for WandB auto-logging"""
