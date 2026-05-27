@@ -3,7 +3,7 @@ set -e
 
 # Target Scene Directory Location
 SCENE="6VSV7_695_v2"
-VERSION="v2.1"
+VERSION="v3.0"
 DATA_PATH="data/${SCENE}"
 WARMUP_VERSION="v3.0"
 

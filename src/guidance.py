@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import (
     StableDiffusionControlNetImg2ImgPipeline,
+    StableDiffusionXLControlNetImg2ImgPipeline,
     ControlNetModel,
-    DDIMScheduler
+    DDIMScheduler,
+    EulerDiscreteScheduler 
 )
 
 from src.config import GuidanceConfig
@@ -24,22 +26,46 @@ class StableDiffusionControlNetGuidance(nn.Module):
         controlnet_tile = ControlNetModel.from_pretrained(cfg.tile_path, torch_dtype=self.weights_dtype)
         controlnet_depth = ControlNetModel.from_pretrained(cfg.depth_path, torch_dtype=self.weights_dtype)
         
-        print("[INFO] Loading Stable Diffusion Pipeline...")
-        self.pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-            cfg.sd_path,
-            controlnet=[controlnet_tile, controlnet_depth],
-            torch_dtype=self.weights_dtype,
-            safety_checker=None,
-        ).to(self.device)
+      
         
-        # if cfg.ip_adapter_scale > 0.0:
-        print("[INFO] Loading IP-Adapter...")
-        self.pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin")
+        if cfg.sd_path.startswith("SG161222/RealVisXL_V4.0"):
+            print("[INFO] Loading Stable Diffusion Pipeline...")
+            self.pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+                cfg.sd_path,
+                controlnet=[controlnet_tile, controlnet_depth],
+                torch_dtype=self.weights_dtype,
+                variant="fp16",
+                use_safetensors=True
+            ).to(self.device)
+
+            
+            print("[INFO] Loading IP-Adapter...")
+            self.pipe.load_ip_adapter(
+                "h94/IP-Adapter", 
+                subfolder="sdxl_models",
+                weight_name="ip-adapter_sdxl.bin"
+            )
+        else:
+            print("[INFO] Loading Stable Diffusion Pipeline...")
+            self.pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+                cfg.sd_path,
+                controlnet=[controlnet_tile, controlnet_depth],
+                torch_dtype=self.weights_dtype,
+                safety_checker=None,
+            ).to(self.device)
+            
+            print("[INFO] Loading IP-Adapter...")
+            self.pipe.load_ip_adapter("h94/IP-Adapter", subfolder="models", weight_name="ip-adapter_sd15.bin")
         self.pipe.set_ip_adapter_scale(cfg.ip_adapter_scale)
         
         # Optimizations
         self.pipe.enable_xformers_memory_efficient_attention()
-        self.scheduler = DDIMScheduler.from_config(self.pipe.scheduler.config)
+        
+        if cfg.sd_path.startswith("SG161222/RealVisXL_V4.0"):
+            print("[INFO] Using Euler Scheduler for SDXL...")
+            self.scheduler = EulerDiscreteScheduler.from_config(self.pipe.scheduler.config)
+        else:
+            self.scheduler = DDIMScheduler.from_config(self.pipe.scheduler.config)
         self.pipe.scheduler = self.scheduler
         self.pipe.set_progress_bar_config(disable=True)
         

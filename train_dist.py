@@ -56,7 +56,7 @@ def run_distillation():
         
     # 2. Setup Splats & Strategy
     splats, optimizers = create_splats_with_optimizers(
-        ply_path=os.path.join(cfg.data_dir, "pointcloud.ply"), cfg=cfg.opts, device=cfg.device, sh_degree=cfg.sh_degree
+        ply_path=os.path.join(cfg.data_dir, "pointcloud.ply"), cfg=cfg, device=cfg.device, sh_degree=cfg.sh_degree
     )
     strategy = DefaultStrategy(verbose=False)
     

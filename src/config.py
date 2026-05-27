@@ -27,15 +27,29 @@ class ScheduleConfig:
 
 @dataclass
 class GuidanceConfig:
-    sd_path: str = "stable-diffusion-v1-5/stable-diffusion-v1-5"
-    tile_path: str = "lllyasviel/control_v11f1e_sd15_tile"
-    depth_path: str = "lllyasviel/control_v11f1p_sd15_depth"
-    guidance_scale: float = 7.5
-    controlnet_scales: List[float] = field(default_factory=lambda: [0.85, 1.0])
+    # sd_path: str = "stable-diffusion-v1-5/stable-diffusion-v1-5"
+    # tile_path: str = "lllyasviel/control_v11f1e_sd15_tile"
+    # depth_path: str = "lllyasviel/control_v11f1p_sd15_depth"
+    # guidance_scale: float = 7.5
+    # controlnet_scales: List[float] = field(default_factory=lambda: [0.85, 1.0])
+    # ip_adapter_scale: float = 0.5
+    # num_steps_sample: int = 20
+    # min_step_percent: float = 0.05
+    # max_step_percent: float = 0.4
+        # Use a photorealistic SDXL fine-tune
+    sd_path: str = "SG161222/RealVisXL_V4.0" 
+    # SDXL specific ControlNets
+    tile_path: str = "xinsir/controlnet-tile-sdxl-1.0"
+    depth_path: str = "diffusers/controlnet-depth-sdxl-1.0"
+    
+    guidance_scale: float = 5.0 # SDXL usually needs lower guidance (4.0 - 5.0)
+    controlnet_scales: List[float] = field(default_factory=lambda: [0.6, 0.8]) # Lower slightly to prevent burning
     ip_adapter_scale: float = 0.5
     num_steps_sample: int = 20
     min_step_percent: float = 0.05
     max_step_percent: float = 0.4
+    
+    
 
 @dataclass
 class PipelineConfig:
