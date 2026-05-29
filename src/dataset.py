@@ -6,14 +6,24 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 class CustomGSDataset(Dataset):
-    def __init__(self, data_dir: str, device: str = "cuda"):
+    def __init__(self, data_dir: str, device: str = "cuda", split: str = "train", test_every: int = 8):
         self.data_dir = data_dir
         self.device = device
-        
+        self.split = split
+
         with open(os.path.join(data_dir, "transforms.json"), "r") as f:
             self.meta = json.load(f)
             
-        self.frames = self.meta["frames"]
+        all_frames = self.meta["frames"]
+        
+        # Split the data
+        if split == "train":
+            self.frames = [f for i, f in enumerate(all_frames) if i % test_every != 0]
+        elif split == "test":
+            self.frames = [f for i, f in enumerate(all_frames) if i % test_every == 0]
+        else:
+            self.frames = all_frames
+        
         self.W = int(self.meta["w"])
         self.H = int(self.meta["h"])
         

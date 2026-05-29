@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import List
+from typing import List, Optional
 
 @dataclass
 class OptimizerConfig:
@@ -69,7 +69,19 @@ class PipelineConfig:
     log_interval: int = 500
     vis_interval: int = 500
     
-    # --- NEW: Densification Strategy ---
+    # --- Evaluation & File I/O Parameters ---
+    run_eval: bool = True  # Toggle evaluation during training
+    test_every: int = 8
+    eval_steps: List[int] = field(default_factory=lambda: [7500, 15000, 30000])
+    use_color_correction_metric: bool = True
+    color_correct_method: str = "affine" # "affine" or "quadratic"
+    
+    # --- PLY Export ---
+    save_ply: bool = True
+    ply_steps: List[int] = field(default_factory=lambda: [15000, 30000])
+    render_traj_path: str = "ellipse"
+    
+    # --- Densification Strategy ---
     strategy_type: str = "default" # "default" or "mcmc"
     init_opa: float = 0.1
     init_scale: float = 1.0
@@ -79,7 +91,7 @@ class PipelineConfig:
     # Loss Optimization Coefficients
     lambda_ssim: float = 0.2
     
-    # EXPERT FIX: Updated Distillation Weights
+    # Updated Distillation Weights
     lambda_distill_rgb: float = 15.0     # Very low: Stop fighting the deblurring process
     lambda_distill_depth: float = 3.0   # High: Trust the LiDAR constraints
     lambda_distill_mse: float = 1.0     # Baseline pixel matching

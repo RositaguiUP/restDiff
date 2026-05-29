@@ -1,6 +1,7 @@
 import os
 import argparse
 import random
+from time import time
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -8,9 +9,11 @@ import wandb
 
 from gsplat.rendering import rasterization
 from gsplat.strategy import DefaultStrategy, MCMCStrategy
+from gsplat import export_splats
 
 from src.config import PipelineConfig
 from src.dataset import CustomGSDataset
+from evaluation import EvaluationEngine
 from src.losses import LossEngine, DynamicLossScheduler
 from src.model import create_splats_with_optimizers
 from src.utils import PipelineHelpers
@@ -20,6 +23,7 @@ def parse_args():
     parser.add_argument("--scene_name", type=str, required=True)
     parser.add_argument("--version", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
+    parser.add_argument("--run_eval", action="store_true", help="Flag to enable evaluation during training")
     parser.add_argument("--strategy_type", type=str, default="default", choices=["default", "mcmc"])
     parser.add_argument("--depth_start", type=float, default=0.3)
     parser.add_argument("--depth_end", type=float, default=0.02)
@@ -43,6 +47,7 @@ def run_warmup():
         scene_name=args.scene_name,
         version=args.version,
         data_dir=args.data_dir,
+        run_eval=args.run_eval,
         strategy_type=args.strategy_type,
     )
     
@@ -58,10 +63,15 @@ def run_warmup():
     stage = "warmup"
     base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}"
     ckpt_dir = os.path.join(base_dir, "checkpoints")
+    stats_dir = os.path.join(base_dir, "stats")
+    ply_dir = os.path.join(base_dir, "ply")
     os.makedirs(base_dir, exist_ok=True)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(stats_dir, exist_ok=True)
+    os.makedirs(ply_dir, exist_ok=True)
     
-    # 1. Setup Dataset, Losses, and Helpers
-    dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device)
+    # 1. Setup Dataset, Losses, and Helpers    
+    train_dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device, split="train", test_every=cfg.test_every)    
     losses = LossEngine(device=cfg.device)
     loss_scheduler = DynamicLossScheduler(cfg.schedule)
     helpers = PipelineHelpers(device=cfg.device)
@@ -93,11 +103,17 @@ def run_warmup():
         config=cfg.to_dict() # Auto-populates Wandb Config UI
     )
     
+    if cfg.run_eval:
+        val_dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device, split="test", test_every=cfg.test_every)
+        eval_engine = EvaluationEngine(cfg)
+    
+    start_time = time.time()
+    
     # 3. Main Training Loop
     for step in tqdm(range(cfg.max_steps_warmup)):
         # Fetch random camera frame
-        idx = torch.randint(0, len(dataset), (1,)).item()
-        data = dataset[idx]
+        idx = torch.randint(0, len(train_dataset), (1,)).item()
+        data = train_dataset[idx]
         
         c2w = data["camtoworld"].unsqueeze(0) # [1, 4, 4]
         K = data["K"].unsqueeze(0)            # [1, 3, 3]
@@ -123,8 +139,8 @@ def run_warmup():
             colors=colors_sh,
             viewmats=viewmats,
             Ks=K,
-            width=dataset.W,
-            height=dataset.H,
+            width=train_dataset.W,
+            height=train_dataset.H,
             sh_degree=sh_degree_to_use,
             packed=False,
             absgrad=(
@@ -200,12 +216,23 @@ def run_warmup():
             
         if step % cfg.vis_interval == 0:
             helpers.log_visuals(step, pred_img, gt_img, pred_depth, gt_depth, prefix="warmup_vis")
-            
+        
+        if cfg.run_eval and step > 0 and step in cfg.eval_steps:
+            eval_engine.evaluate(step, splats, val_dataset, start_time, stats_dir)
+          
         if step > 0 and step % cfg.ckpt_interval == 0:
-            helpers.save_checkpoint(splats, optimizers, strategy_state, step, ckpt_dir, "warmup", preserve_steps=[7500, 15000])
-    
+            helpers.save_checkpoint(splats, optimizers, strategy_state, step, ckpt_dir, "warmup", preserve_steps=cfg.eval_steps)
+
+        if cfg.save_ply and (step in cfg.ply_steps or step == cfg.max_steps_warmup - 1):
+            export_splats(
+                means=splats["means"], scales=splats["scales"], quats=splats["quats"], 
+                opacities=splats["opacities"], sh0=splats["sh0"], shN=splats["shN"],
+                format="ply", save_to=os.path.join(ply_dir, f"point_cloud_{step}.ply")
+            )
+            
+    helpers.save_checkpoint(splats, optimizers, strategy_state, cfg.max_steps_warmup, ckpt_dir, "warmup", preserve_steps=cfg.eval_steps)
+    eval_engine.evaluate(cfg.max_steps_warmup, splats, val_dataset, start_time, stats_dir)
     print("\n[INFO] Training complete. Saving final state...")
-    helpers.save_checkpoint(splats, optimizers, strategy_state, cfg.max_steps_warmup, ckpt_dir, "warmup", preserve_steps=[7500, 15000])
     wandb.finish()
 
 if __name__ == "__main__":
