@@ -35,12 +35,12 @@ class CustomGSDataset(Dataset):
         ], dtype=torch.float32, device=self.device)
         
         # Matrix to convert OpenGL (Right-Up-Back) to OpenCV (Right-Down-Forward)
-        self.gl_to_cv = torch.tensor([
-            [1,  0,  0,  0],
-            [0, -1,  0,  0],
-            [0,  0, -1,  0],
-            [0,  0,  0,  1]
-        ], dtype=torch.float32, device=self.device)
+        # self.gl_to_cv = torch.tensor([
+        #     [1,  0,  0,  0],
+        #     [0, -1,  0,  0],
+        #     [0,  0, -1,  0],
+        #     [0,  0,  0,  1]
+        # ], dtype=torch.float32, device=self.device)
 
     def __len__(self):
         return len(self.frames)
@@ -58,9 +58,10 @@ class CustomGSDataset(Dataset):
         depth_array = np.load(depth_path)
         depth_tensor = torch.from_numpy(depth_array).float()
         
-        # Load and Convert Camera Matrix (C2W) (OpenGL -> OpenCV)
-        c2w_gl = torch.tensor(frame["transform_matrix"], dtype=torch.float32, device=self.device)
-        c2w_cv = c2w_gl @ self.gl_to_cv
+        # Load and Convert Camera Matrix (C2W) (Already in OpenCV format)
+        c2w_cv = torch.tensor(frame["transform_matrix"], dtype=torch.float32, device=self.device)
+        # c2w_gl = torch.tensor(frame["transform_matrix"], dtype=torch.float32, device=self.device)
+        # c2w_cv = c2w_gl @ self.gl_to_cv
         
         return {
             "image": img_tensor.to(self.device),

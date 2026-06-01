@@ -2,19 +2,21 @@
 set -e
 
 # Target Scene Directory Location
-VERSION="v5.1"
+VERSION="v5.0"
 SCENE="6VSV7_695_v2"
-DATA_PATH="data/${SCENE}"
-RESULT_DIR="results/${SCENE}/warmup/${VERSION}"
+FLOOR="0"
+DATA_PATH="data/${SCENE}/${FLOOR}"
+RESULT_DIR="results/${SCENE}/warmup/${VERSION}/${FLOOR}"
 
-STRATEGY="mcmc" # "default" or "mcmc"
+STRATEGY="default" # "default" or "mcmc"
 
 echo "========================================================"
 echo " 1. Training Scene (Without Interruption) "
 echo "========================================================"
-echo "[STAGE 2] Executing Geometrical Warmup on scene: ${SCENE} (Version: ${VERSION})"
+echo "[STAGE 2] Executing Geometrical Warmup on scene: ${SCENE} | Floor: ${FLOOR} (Version: ${VERSION})"
 python train_warmup.py \
     --scene_name "$SCENE" \
+    --floor_number "$FLOOR" \
     --version "$VERSION" \
     --data_dir "$DATA_PATH" \
     --strategy_type "$STRATEGY" \

@@ -1,7 +1,7 @@
 import os
 import argparse
 import random
-from time import time
+import time
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -21,6 +21,7 @@ from src.utils import PipelineHelpers
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--scene_name", type=str, required=True)
+    parser.add_argument("--floor_number", type=int, required=True)
     parser.add_argument("--version", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--run_eval", action="store_true", help="Flag to enable evaluation during training")
@@ -45,6 +46,7 @@ def run_warmup():
     # Setup configs
     cfg = PipelineConfig(
         scene_name=args.scene_name,
+        floor_number=args.floor_number,
         version=args.version,
         data_dir=args.data_dir,
         run_eval=args.run_eval,
@@ -61,7 +63,7 @@ def run_warmup():
     
     # Dynamic Directories
     stage = "warmup"
-    base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}"
+    base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}/{cfg.floor_number}"
     ckpt_dir = os.path.join(base_dir, "checkpoints")
     stats_dir = os.path.join(base_dir, "stats")
     ply_dir = os.path.join(base_dir, "ply")
@@ -95,13 +97,16 @@ def run_warmup():
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=0.01 ** (1.0 / cfg.max_steps_warmup))
 
     # Project and Run Naming integration
-    name = f"{cfg.scene_name}-{cfg.version}"
+    name = f"{cfg.scene_name}-{cfg.version}-f{cfg.floor_number}"
     wandb.init(
         project="thesis-gsplat-warmup",
         name=name,
         dir=base_dir,
         config=cfg.to_dict() # Auto-populates Wandb Config UI
     )
+    
+    eval_engine = None
+    val_dataset = None
     
     if cfg.run_eval:
         val_dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device, split="test", test_every=cfg.test_every)
@@ -217,7 +222,7 @@ def run_warmup():
         if step % cfg.vis_interval == 0:
             helpers.log_visuals(step, pred_img, gt_img, pred_depth, gt_depth, prefix="warmup_vis")
         
-        if cfg.run_eval and step > 0 and step in cfg.eval_steps:
+        if cfg.run_eval and eval_engine is not None and step > 0 and step in cfg.eval_steps:
             eval_engine.evaluate(step, splats, val_dataset, start_time, stats_dir)
           
         if step > 0 and step % cfg.ckpt_interval == 0:
@@ -230,9 +235,11 @@ def run_warmup():
                 format="ply", save_to=os.path.join(ply_dir, f"point_cloud_{step}.ply")
             )
             
-    helpers.save_checkpoint(splats, optimizers, strategy_state, cfg.max_steps_warmup, ckpt_dir, "warmup", preserve_steps=cfg.eval_steps)
-    eval_engine.evaluate(cfg.max_steps_warmup, splats, val_dataset, start_time, stats_dir)
     print("\n[INFO] Training complete. Saving final state...")
+    helpers.save_checkpoint(splats, optimizers, strategy_state, cfg.max_steps_warmup, ckpt_dir, "warmup", preserve_steps=cfg.eval_steps)
+    if cfg.run_eval and eval_engine is not None:
+        print("[INFO] Running final evaluation on last checkpoint...")
+        eval_engine.evaluate(cfg.max_steps_warmup, splats, val_dataset, start_time, stats_dir)
     wandb.finish()
 
 if __name__ == "__main__":

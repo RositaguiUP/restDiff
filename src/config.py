@@ -55,6 +55,7 @@ class GuidanceConfig:
 class PipelineConfig:
     # Project Identity
     scene_name: str = "my_scene"
+    floor_number: int = 1
     version: str = "v1"
     data_dir: str = "data/my_scene"
     device: str = "cuda"
@@ -66,7 +67,7 @@ class PipelineConfig:
     max_steps_warmup: int = 30000
     max_steps_distill: int = 15000
     ckpt_interval: int = 2500
-    log_interval: int = 500
+    log_interval: int = 50
     vis_interval: int = 500
     
     # --- Evaluation & File I/O Parameters ---
