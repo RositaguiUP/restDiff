@@ -13,7 +13,7 @@ from gsplat import export_splats
 
 from src.config import PipelineConfig
 from src.dataset import CustomGSDataset
-from evaluation import EvaluationEngine
+from evaluation.evaluation import EvaluationEngine
 from src.losses import LossEngine, DynamicLossScheduler
 from src.model import create_splats_with_optimizers
 from src.utils import PipelineHelpers

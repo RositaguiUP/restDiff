@@ -23,18 +23,10 @@ def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda"):
         [0, meta["fl_y"], meta["cy"]],
         [0, 0, 1]
     ], dtype=torch.float32, device=device).unsqueeze(0)
-    
-    gl_to_cv = torch.tensor([
-        [1,  0,  0,  0],
-        [0, -1,  0,  0],
-        [0,  0, -1,  0],
-        [0,  0,  0,  1]
-    ], dtype=torch.float32, device=device)
 
     print(f"Rendering {len(meta['frames'])} novel views...")
     for idx, frame in enumerate(tqdm(meta["frames"])):
-        c2w_gl = torch.tensor(frame["transform_matrix"], dtype=torch.float32, device=device)
-        c2w_cv = (c2w_gl @ gl_to_cv).unsqueeze(0)
+        c2w_cv = torch.tensor(frame["transform_matrix"], dtype=torch.float32, device=device)
         viewmats = torch.linalg.inv(c2w_cv)
         
         colors_sh = torch.cat([splats["sh0"], splats["shN"]], dim=1)

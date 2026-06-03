@@ -33,14 +33,6 @@ class CustomGSDataset(Dataset):
             [0, self.meta["fl_y"], self.meta["cy"]],
             [0, 0, 1]
         ], dtype=torch.float32, device=self.device)
-        
-        # Matrix to convert OpenGL (Right-Up-Back) to OpenCV (Right-Down-Forward)
-        # self.gl_to_cv = torch.tensor([
-        #     [1,  0,  0,  0],
-        #     [0, -1,  0,  0],
-        #     [0,  0, -1,  0],
-        #     [0,  0,  0,  1]
-        # ], dtype=torch.float32, device=self.device)
 
     def __len__(self):
         return len(self.frames)

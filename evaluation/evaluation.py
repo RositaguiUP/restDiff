@@ -115,13 +115,14 @@ class EvaluationEngine:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Standalone GS Evaluation Script")
     parser.add_argument("--scene_name", type=str, required=True)
+    parser.add_argument("--floor_number", type=int, required=True)
     parser.add_argument("--version", type=str, required=True)
     parser.add_argument("--data_dir", type=str, required=True)
     parser.add_argument("--ckpt", type=str, required=True, help="Path to the .pt checkpoint")
     args = parser.parse_args()
 
     cfg = PipelineConfig(scene_name=args.scene_name, version=args.version, data_dir=args.data_dir)
-    stats_dir = f"results/{cfg.scene_name}/warmup/{cfg.version}/stats"
+    stats_dir = f"results/{cfg.scene_name}/warmup/{cfg.version}/{args.floor_number}/stats"
     
     val_dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device, split="test", test_every=cfg.test_every)
     eval_engine = EvaluationEngine(cfg)
