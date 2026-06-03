@@ -2,13 +2,13 @@
 set -e
 
 # Target Scene Directory Location
-VERSION="v5.0"
+VERSION="v6.1.1"
 SCENE="6VSV7_695_v2"
 FLOOR="0"
 DATA_PATH="data/${SCENE}/${FLOOR}"
 RESULT_DIR="results/${SCENE}/warmup/${VERSION}/${FLOOR}"
 
-STRATEGY="default" # "default" or "mcmc"
+STRATEGY="mcmc" # "default" or "mcmc"
 
 echo "========================================================"
 echo " 1. Training Scene (Without Interruption) "
@@ -20,6 +20,7 @@ python train_warmup.py \
     --version "$VERSION" \
     --data_dir "$DATA_PATH" \
     --strategy_type "$STRATEGY" \
+    --run_eval \
     --depth_start 0.3 \
     --depth_end 0.02 \
     --hold_steps 7500 \

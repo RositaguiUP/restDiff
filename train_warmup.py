@@ -84,7 +84,7 @@ def run_warmup():
     )
     
     if cfg.strategy_type == "mcmc":
-        strategy = MCMCStrategy(verbose=True)
+        strategy = MCMCStrategy(cap_max=cfg.mcmc_cap_max, verbose=True)
         strategy.init_opa = cfg.init_opa
         strategy.init_scale = cfg.init_scale
         strategy.opacity_reg = cfg.opacity_reg
@@ -92,10 +92,10 @@ def run_warmup():
         strategy_state = strategy.initialize_state()
     else:
         strategy = DefaultStrategy(verbose=True)
-        strategy_state = strategy.initialize_state(scene_scale=1.0)
+        strategy_state = strategy.initialize_state(scene_scale=1.0)  # Use a fixed scale for the default strategy to prevent giant Gaussians filling the whole screen
         
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=0.01 ** (1.0 / cfg.max_steps_warmup))
-
+        
     # Project and Run Naming integration
     name = f"{cfg.scene_name}-{cfg.version}-f{cfg.floor_number}"
     wandb.init(
@@ -159,7 +159,9 @@ def run_warmup():
         rendered = render_colors.squeeze(0)  # Shape becomes [H, W, 4]
         pred_img = rendered[..., :3]  # Channels 0, 1, 2 (RGB)
         pred_depth = rendered[..., 3]  # Channel 3 (Expected Projection Depth)
-
+        
+        
+        
         # --- Pre-Backward Strategy Step ---
         strategy.step_pre_backward(
             params=splats, optimizers=optimizers, state=strategy_state, step=step, info=info
@@ -177,39 +179,17 @@ def run_warmup():
         total_loss = rgb_weighted + depth_weighted
         
         # --- MCMC Regularization ---
-        if cfg.strategy_type == "mcmc":
-            # Scale the penalty by the total magnitude of your custom losses
-            loss_multiplier = current_w_rgb + current_w_depth
-            
-            if cfg.opacity_reg > 0.0:
-                total_loss += (cfg.opacity_reg * loss_multiplier) * torch.sigmoid(splats["opacities"]).mean()
-            if cfg.scale_reg > 0.0:
-                total_loss += (cfg.scale_reg * loss_multiplier) * torch.exp(splats["scales"]).mean()
+        # if cfg.strategy_type == "mcmc":
+        #     # Scale the penalty by the total magnitude of your custom losses
+        loss_multiplier = current_w_rgb + current_w_depth
+        
+        if cfg.opacity_reg > 0.0:
+            total_loss += (cfg.opacity_reg * loss_multiplier) * torch.sigmoid(splats["opacities"]).mean()
+        if cfg.scale_reg > 0.0:
+            total_loss += (cfg.scale_reg * loss_multiplier) * torch.exp(splats["scales"]).mean()
 
         total_loss.backward()
-
-        # Optimization & Densification Steps
-        for opt in optimizers.values():
-            opt.step()
-            opt.zero_grad(set_to_none=True)
         
-        current_lr = scheduler.get_last_lr()[0]
-        scheduler.step()
-        
-        # --- Post-Backward Dynamic Strategy Stepping ---
-        scene_scale = 1.0
-        if len(splats["means"]) > 0:
-            scene_scale = torch.max(
-                splats["means"].max(dim=0).values - splats["means"].min(dim=0).values
-            ).item()
-
-        if cfg.strategy_type == "mcmc":
-            strategy = MCMCStrategy(verbose=True)
-            strategy_state = strategy.initialize_state()
-        else:
-            strategy = DefaultStrategy(verbose=True)
-            strategy_state = strategy.initialize_state(scene_scale=scene_scale)
-
         # Logging
         if step % cfg.log_interval == 0:
             helpers.log_telemetry(step, total_loss.item(), rgb_weighted.item(), depth_weighted.item(), pred_img, gt_img, len(splats["means"]), extra_losses={
@@ -221,11 +201,8 @@ def run_warmup():
             
         if step % cfg.vis_interval == 0:
             helpers.log_visuals(step, pred_img, gt_img, pred_depth, gt_depth, prefix="warmup_vis")
-        
-        if cfg.run_eval and eval_engine is not None and step > 0 and step in cfg.eval_steps:
-            eval_engine.evaluate(step, splats, val_dataset, start_time, stats_dir)
-          
-        if step > 0 and step % cfg.ckpt_interval == 0:
+            
+        if step > 0 and (step + 1) % cfg.ckpt_interval == 0:
             helpers.save_checkpoint(splats, optimizers, strategy_state, step, ckpt_dir, "warmup", preserve_steps=cfg.eval_steps)
 
         if cfg.save_ply and (step in cfg.ply_steps or step == cfg.max_steps_warmup - 1):
@@ -234,12 +211,44 @@ def run_warmup():
                 opacities=splats["opacities"], sh0=splats["sh0"], shN=splats["shN"],
                 format="ply", save_to=os.path.join(ply_dir, f"point_cloud_{step}.ply")
             )
+
+        # Optimization & Densification Steps
+        for opt in optimizers.values():
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+        
+        
+        scheduler.step()
+        current_lr = scheduler.get_last_lr()[0]
+        
+        # --- Post-Backward Dynamic Strategy Stepping ---
+        # Run post-backward steps after backward and optimizer
+        if cfg.strategy_type == "mcmc":
+            strategy.step_post_backward(
+                params=splats,
+                optimizers=optimizers,
+                state=strategy_state,
+                step=step,
+                info=info,
+                lr=current_lr
+            )
+        else:
+            strategy.step_post_backward(
+                params=splats,
+                optimizers=optimizers,
+                state=strategy_state,
+                step=step,
+                info=info,
+                packed=False,
+            )
+        
+        
+        if cfg.run_eval and eval_engine is not None and step > 0 and step in cfg.eval_steps:
+            eval_engine.evaluate(step, splats, val_dataset, start_time, stats_dir)
+          
+        
             
-    print("\n[INFO] Training complete. Saving final state...")
-    helpers.save_checkpoint(splats, optimizers, strategy_state, cfg.max_steps_warmup, ckpt_dir, "warmup", preserve_steps=cfg.eval_steps)
-    if cfg.run_eval and eval_engine is not None:
-        print("[INFO] Running final evaluation on last checkpoint...")
-        eval_engine.evaluate(cfg.max_steps_warmup, splats, val_dataset, start_time, stats_dir)
+    print("\n[INFO] Training complete")
     wandb.finish()
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ def create_splats_with_optimizers(ply_path: str, cfg: PipelineConfig, device: st
     # 3. Initialize other attributes
     quats = torch.rand((N, 4), device=device)
     quats[:, 0] = 1.0
-    opacities = torch.logit(torch.full((N,), 0.1, device=device))
+    opacities = torch.logit(torch.full((N,), cfg.init_opa, device=device))
     
     colors = torch.zeros((N, (sh_degree + 1) ** 2, 3), device=device)
     colors[:, 0, :] = rgb_to_sh(rgbs)
