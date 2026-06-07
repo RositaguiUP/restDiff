@@ -83,4 +83,4 @@ if __name__ == "__main__":
     main()
     
     
-# python evaluation/compile_stats.py --stage warmup --version v6.1 --steps 30000 --results-dir ./results --output results/_stats_/metrics_v6.1.csv
+# python evaluation/compile_stats.py --stage warmup --version v6.0 --steps 29999 --scenes 6VSV7_695_v2 --results-dir ./results --output results/_stats_/metrics_v6.1.csv

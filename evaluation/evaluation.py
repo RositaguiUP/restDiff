@@ -2,6 +2,7 @@ import os
 import time
 import json
 import argparse
+
 import torch
 import numpy as np
 import wandb
@@ -114,23 +115,30 @@ class EvaluationEngine:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Standalone GS Evaluation Script")
+    parser.add_argument("--stage", type=str, required=True)
+    parser.add_argument("--version", type=str, required=True)
     parser.add_argument("--scene_name", type=str, required=True)
     parser.add_argument("--floor_number", type=int, required=True)
-    parser.add_argument("--version", type=str, required=True)
-    parser.add_argument("--data_dir", type=str, required=True)
-    parser.add_argument("--ckpt", type=str, required=True, help="Path to the .pt checkpoint")
+    # parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint number (e.g., ckpt_warmup_29999.pt)")
     args = parser.parse_args()
+    
+    print("starting evaluation")
 
-    cfg = PipelineConfig(scene_name=args.scene_name, version=args.version, data_dir=args.data_dir)
-    stats_dir = f"results/{cfg.scene_name}/warmup/{cfg.version}/{args.floor_number}/stats"
+    data_dir = f"data/{args.scene_name}/{args.floor_number}"
+
+    cfg = PipelineConfig(scene_name=args.scene_name, version=args.version, data_dir=data_dir, floor_number=args.floor_number)
+    stats_dir = f"results/{cfg.scene_name}/{args.stage}/{args.version}/{args.floor_number}/stats"
     
     val_dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device, split="test", test_every=cfg.test_every)
     eval_engine = EvaluationEngine(cfg)
     
     print(f"[INFO] Loading checkpoint: {args.ckpt}")
+    stats_dir = f"results/{args.scene_name}/{args.stage}/{args.version}/{args.floor_number}/checkpoints/ckpt_{args.stage}_{args.ckpt}.pt"
     checkpoint = torch.load(args.ckpt, map_location=cfg.device, weights_only=True)
     splats = checkpoint["splats"]
     step = checkpoint.get("step", cfg.max_steps_warmup)
     
     eval_engine.evaluate(step, splats, val_dataset, start_time=time.time(), stats_dir=stats_dir)
     print("[INFO] Standalone evaluation complete.")
+    
+# python evaluation/evaluation.py --stage warmup --version v6.0 --scenes 6VSV7_695_v2 --floor_number 0  --ckpt 29999 --data_dir data/6VSV7_695_v2/0

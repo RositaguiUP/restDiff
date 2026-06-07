@@ -101,12 +101,21 @@ class PipelineHelpers:
         latest_path = os.path.join(output_dir, f"ckpt_{name_tag}_latest.pt")
         
         torch.save(checkpoint, ckpt_path)
-        torch.save(checkpoint, latest_path)
+        
+        # Only create/update latest if this step is not the highest preserved step
+        max_preserved = max(preserve_steps) if preserve_steps else None
+        if step != max_preserved:
+            torch.save(checkpoint, latest_path)
+
         
         # Cleanup: Delete old files that aren't 'latest' or in the preserve list
         all_ckpts = glob.glob(os.path.join(output_dir, f"ckpt_{name_tag}_*.pt"))
         for f in all_ckpts:
-            if "latest" in f: continue
+            if "latest" in f: 
+                if step == max_preserved:
+                    os.remove(f)
+                else:
+                    continue
             try:
                 f_step = int(f.split("_")[-1].split(".")[0])
                 if f_step != step and f_step not in preserve_steps:

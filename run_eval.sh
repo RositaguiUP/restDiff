@@ -3,13 +3,14 @@
 # Default Configuration Constants
 STAGE="warmup"
 VERSION="v6.0"
-STEPS="14999 29999"
-SCENES="DVJQQ_367"
+# STEPS="14999 29999"
+STEPS="29999"
+SCENES="6VSV7_695_v2 6VSV7_695_v3"
 MAX_VIS="15"
-RUN_COMPILE=true
+RUN_COMPILE=false
 RUN_VISUALIZE=true
 # OUTPUT_CSV="./results/_stats_/stats_comparison_v6_0.csv"
-OUTPUT_CSV="./results/_stats_/test01.csv"
+OUTPUT_CSV="./results/_stats_/square_vs_full.csv"
 
 usage() {
     echo "Usage: $0 --stage <stage> --version <version> --steps <step1 step2 ...> [Options]"

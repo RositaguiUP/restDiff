@@ -61,17 +61,6 @@ def run_warmup():
     cfg.schedule.hold_steps = args.hold_steps
     cfg.schedule.decay_steps = args.decay_steps
     
-    # Dynamic Directories
-    stage = "warmup"
-    base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}/{cfg.floor_number}"
-    ckpt_dir = os.path.join(base_dir, "checkpoints")
-    stats_dir = os.path.join(base_dir, "stats")
-    ply_dir = os.path.join(base_dir, "ply")
-    os.makedirs(base_dir, exist_ok=True)
-    os.makedirs(ckpt_dir, exist_ok=True)
-    os.makedirs(stats_dir, exist_ok=True)
-    os.makedirs(ply_dir, exist_ok=True)
-    
     # 1. Setup Dataset, Losses, and Helpers    
     train_dataset = CustomGSDataset(data_dir=cfg.data_dir, device=cfg.device, split="train", test_every=cfg.test_every)    
     losses = LossEngine(device=cfg.device)
@@ -91,11 +80,24 @@ def run_warmup():
         strategy.scale_reg = cfg.scale_reg
         strategy_state = strategy.initialize_state()
     else:
-        strategy = DefaultStrategy(verbose=True)
+        strategy = DefaultStrategy(refine_stop_iter=cfg.refine_stop_iter, verbose=True)
         strategy_state = strategy.initialize_state(scene_scale=1.0)  # Use a fixed scale for the default strategy to prevent giant Gaussians filling the whole screen
         
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizers["means"], gamma=0.01 ** (1.0 / cfg.max_steps_warmup))
+    
+    
         
+    # Dynamic Directories
+    stage = "warmup"
+    base_dir = f"results/{cfg.scene_name}/{stage}/{cfg.version}/{cfg.floor_number}"
+    ckpt_dir = os.path.join(base_dir, "checkpoints")
+    stats_dir = os.path.join(base_dir, "stats")
+    ply_dir = os.path.join(base_dir, "ply")
+    os.makedirs(base_dir, exist_ok=True)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(stats_dir, exist_ok=True)
+    os.makedirs(ply_dir, exist_ok=True)
+    
     # Project and Run Naming integration
     name = f"{cfg.scene_name}-{cfg.version}-f{cfg.floor_number}"
     wandb.init(
@@ -245,8 +247,6 @@ def run_warmup():
         
         if cfg.run_eval and eval_engine is not None and step > 0 and step in cfg.eval_steps:
             eval_engine.evaluate(step, splats, val_dataset, start_time, stats_dir)
-          
-        
             
     print("\n[INFO] Training complete")
     wandb.finish()

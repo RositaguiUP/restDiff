@@ -73,12 +73,12 @@ class PipelineConfig:
     # --- Evaluation & File I/O Parameters ---
     run_eval: bool = True  # Toggle evaluation during training
     test_every: int = 8
-    eval_steps: List[int] = field(default_factory=lambda: [7499, 14999, 29999])
+    eval_steps: List[int] = field(default_factory=lambda: [14999, 29999])
     use_color_correction_metric: bool = True
     color_correct_method: str = "affine" # "affine" or "quadratic"
     
     # --- PLY Export ---
-    save_ply: bool = True
+    save_ply: bool = False
     ply_steps: List[int] = field(default_factory=lambda: [14999, 29999])
     render_traj_path: str = "ellipse"
     
@@ -90,6 +90,7 @@ class PipelineConfig:
     scale_reg: float = 0.0
     
     mcmc_cap_max: int = 5_000_000
+    refine_stop_iter: int = 15000
     
     # Loss Optimization Coefficients
     lambda_ssim: float = 0.2
