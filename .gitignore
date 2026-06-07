@@ -12,6 +12,7 @@ wandb/*
 results/*
 data/*
 dataset/*
+finetuned_models/*
 
 *.yaml
 

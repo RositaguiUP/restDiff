@@ -170,6 +170,7 @@ class Generator:
             frame_entry = {
                 "id": idx,
                 "blurry_score": frame["score"],
+                "orientation": frame["view"].get("orientation", "landscape"),
                 "file_path": f"rgb/{idx:05d}.png",
                 "depth_file_path": f"depth/{idx:05d}.npy",
                 "pose": c2w_cv.tolist(),
