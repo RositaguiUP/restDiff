@@ -1,15 +1,19 @@
 import argparse
 import json
-import os
-import sys
 import random
+import sys
 from pathlib import Path
+
+# Add parent directory to path so we can import src
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import torch
 import numpy as np
-from PIL import Image
-from tqdm import tqdm
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 from gsplat.rendering import rasterization
+
+from src.dataset import CustomGSDataset
 
 def main():
     parser = argparse.ArgumentParser(description="Extract novel view test poses, render RGB+D, and plot comparisons.")
@@ -56,45 +60,44 @@ def main():
                     print(f"    [-] Checkpoint file not found: {ckpt_path}")
                     continue
                 
-                # Sourcing transforms.json (checks root or floor level folders)
+                # Check for poses.json (matches CustomGSDataset expectation)
                 scene_data_dir = data_base / scene_name
-                if (scene_data_dir / floor_name / "transforms.json").exists():
+                if (scene_data_dir / floor_name / "poses.json").exists():
                     scene_data_dir = scene_data_dir / floor_name
                 
-                transforms_path = scene_data_dir / "transforms.json"
-                if not transforms_path.exists():
-                    print(f"    [-] transforms.json file not found at: {transforms_path}")
+                if not (scene_data_dir / "poses.json").exists():
+                    print(f"    [-] poses.json file not found at: {scene_data_dir}")
                     continue
-
-                with open(transforms_path, "r") as f:
-                    meta = json.load(f)
-
-                # Split tracking matched to CustomGSDataset logic
-                all_frames = meta["frames"]
-                test_frames = [f for i, f in enumerate(all_frames) if i % args.test_every == 0]
-
-                if not test_frames:
+                
+                # Initialize CustomGSDataset to automatically handle loading and K-matrix logic
+                dataset = CustomGSDataset(data_dir=str(scene_data_dir), device=device, split="test", test_every=args.test_every)
+                
+                if len(dataset) == 0:
                     continue
-
-                # Apply deterministic pseudo-random cap restriction
-                if args.max_visualizations is not None and len(test_frames) > args.max_visualizations:
-                    print(f"    [!] Sampling {args.max_visualizations} deterministic random frames from {len(test_frames)} available test poses.")
-                    # Setting seed right before sampling ensures consistency across runs and steps
+                
+                
+                # Handle deterministic sampling
+                indices = list(range(len(dataset)))
+                if args.max_visualizations is not None and len(indices) > args.max_visualizations:
+                    print(f"    [!] Sampling {args.max_visualizations} deterministic random frames from {len(indices)} available test poses.")
                     random.seed(42)
-                    test_frames = random.sample(test_frames, args.max_visualizations)
+                    indices = random.sample(indices, args.max_visualizations)
 
-                # Save the custom poses output configuration file
+                # Save the custom poses output configuration file based on sampled subset
                 poses_out_dir = scene_data_dir / "poses_to_render"
                 poses_out_dir.mkdir(parents=True, exist_ok=True)
-                poses_filename = f"test_step_{step}"
-                poses_json_path = poses_out_dir / f"{poses_filename}.json"
-
+                
+                subset_frames = [dataset.frames[i] for i in indices]
                 poses_payload = {
-                    "w": meta.get("w"), "h": meta.get("h"),
-                    "fl_x": meta.get("fl_x"), "fl_y": meta.get("fl_y"),
-                    "cx": meta.get("cx"), "cy": meta.get("cy"),
-                    "frames": test_frames
+                    "w": dataset.W, 
+                    "h": dataset.H,
+                    # We pass the fallback intrinsics from the dataset's top-level metadata if they exist
+                    "fl_x": dataset.meta.get("fl_x"), "fl_y": dataset.meta.get("fl_y"),
+                    "cx": dataset.meta.get("cx"), "cy": dataset.meta.get("cy"),
+                    "frames": subset_frames
                 }
+                
+                poses_json_path = poses_out_dir / f"test_step_{step}.json"
                 with open(poses_json_path, "w") as f:
                     json.dump(poses_payload, f, indent=4)
 
@@ -103,23 +106,24 @@ def main():
                 splats = checkpoint["splats"]
                 colors_sh = torch.cat([splats["sh0"], splats["shN"]], dim=1)
 
-                W, H = int(poses_payload["w"]), int(poses_payload["h"])
-                K = torch.tensor([
-                    [poses_payload["fl_x"], 0, poses_payload["cx"]],
-                    [0, poses_payload["fl_y"], poses_payload["cy"]],
-                    [0, 0, 1]
-                ], dtype=torch.float32, device=device).unsqueeze(0)
-
                 # Setup comparison file destination
                 compare_output_dir = floor_path / "comparisons" / f"step_{step}"
                 compare_output_dir.mkdir(parents=True, exist_ok=True)
 
                 print(f"    [+] Plotting Room: {scene_name} | Floor: {floor_name}")
-                for frame in enumerate(tqdm(test_frames, desc="     Progress")):
-                    c2w_cv = torch.tensor(frame["transform_matrix"], dtype=torch.float32, device=device)
-                    viewmats = torch.linalg.inv(c2w_cv).unsqueeze(0)
+                
+                for idx in tqdm(indices, desc="     Progress"):
+                    # Retrieve all data directly from dataset tensors
+                    data = dataset[idx]
+                    frame_meta = dataset.frames[idx]
+                    
+                    c2w = data["camtoworld"]
+                    viewmats = torch.linalg.inv(c2w).unsqueeze(0)
+                    
+                    # K is handled directly by dataset logic
+                    K = data["K"].unsqueeze(0)
 
-                    # Simultaneous RGB and Depth evaluation via multi-channel rasterization
+                    # Rasterization
                     render_outputs, _, _ = rasterization(
                         means=splats["means"],
                         quats=splats["quats"],
@@ -128,29 +132,29 @@ def main():
                         colors=colors_sh,
                         viewmats=viewmats,
                         Ks=K,
-                        width=W, height=H,
+                        width=dataset.W, height=dataset.H,
                         sh_degree=3, packed=False,
-                        render_mode="RGB+D"
+                        render_mode="RGB+ED" # Note: Switched to RGB+ED matching standard expected depth output
                     )
 
                     render_outputs = render_outputs.squeeze(0)
                     rendered_rgb = torch.clamp(render_outputs[..., :3], 0.0, 1.0).cpu().numpy()
                     rendered_depth = render_outputs[..., 3].cpu().numpy()
                     
-                    # Read ground-truth resources
-                    target_rgb_path = scene_data_dir / frame["file_path"]
-                    target_rgb = np.array(Image.open(target_rgb_path).convert("RGB")) / 255.0 if target_rgb_path.exists() else np.zeros((H, W, 3))
-
-                    target_depth_path = scene_data_dir / frame["depth_file_path"]
-                    target_depth = np.load(target_depth_path) if target_depth_path.exists() else np.zeros((H, W))
-
+                    # Extract ground truth from dataset tensors (no redundant PIL/numpy file reads)
+                    target_rgb = data["image"].cpu().numpy()
+                    target_depth = data["depth"].cpu().numpy()
+                    
                     # Construct 2x2 visual breakdown matrix
                     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
                     vmin = min(target_depth.min(), rendered_depth.min())
                     vmax = max(target_depth.max(), rendered_depth.max())
 
+                    orig_filename = Path(frame_meta["file_path"]).name
+                    orig_stem = Path(frame_meta["file_path"]).stem
+
                     axes[0, 0].imshow(target_rgb)
-                    axes[0, 0].set_title(f"Target RGB ({Path(frame['file_path']).name})", fontsize=9, fontweight="bold")
+                    axes[0, 0].set_title(f"Target RGB ({orig_filename})", fontsize=9, fontweight="bold")
                     axes[0, 0].axis("off")
 
                     axes[0, 1].imshow(rendered_rgb)
@@ -166,10 +170,6 @@ def main():
                     axes[1, 1].set_title("Rendered Depth (gsplat)", fontsize=9, fontweight="bold")
                     axes[1, 1].axis("off")
                     fig.colorbar(im_r_depth, ax=axes[1, 1], fraction=0.046, pad=0.04)
-                    
-                    # Extract original RGB scan name configuration
-                    orig_filename = Path(frame["file_path"]).name
-                    orig_stem = Path(frame["file_path"]).stem
                     
                     plt.suptitle(f"Scene: {scene_name} | Floor: {floor_name} | Step: {step} | Frame: {orig_filename}", fontsize=11, fontweight="bold", y=0.97)
                     plt.tight_layout()

@@ -10,10 +10,10 @@ RUN_GENERATION=false
 RUN_WARMUP=true
 
 # Define the list of scenes. 
-# SCENES=("2T382_260" "7HTM8_099" "DVJQQ_367" "SCX7D_671" "5FF69_654" "74VND_105" "7RHGW_158" "DV5B6_994" "GDB3D_521" "MK5Y8_583") 
-SCENES=("SCX7D_671" "74VND_105" "7RHGW_158" "DV5B6_994" "GDB3D_521" "MK5Y8_583") 
-
-# SCENES=("6VSV7_695_v2")
+# SCENES=("2T382_260" "7HTM8_099" "DVJQQ_367" "5FF69_654" "74VND_105" "7RHGW_158" "DV5B6_994" "GDB3D_521" "MK5Y8_583") 
+SCENES=("2B2H9_993" "2DNBK_922" "2F4TK_157" "2F6D4_988" "2GFG5_494" "2CD65_703" "2DPPJ_505" "2G5TT_538" "2J6BP_139")
+# SCENES=("6VSV7_695_v3")
+# SCENES=("2F5Z7_007")
 
 # Initialize Conda for bash script usage
 # (This is required to use 'conda activate' inside a shell script)
@@ -32,7 +32,7 @@ if [ "$RUN_GENERATION" = true ]; then
         echo "-> Running generate_inputs.py for $SCENE"
         
         # Catch errors and skip to the next scene if it fails
-        if ! python generate_inputs.py --config_path "configs/${SCENE}.yaml"; then
+        if ! python generate_inputs.py --config_path "configs/dataset/${SCENE}.yaml"; then
             echo "⚠️ [WARNING] generate_inputs.py failed for $SCENE. Skipping to next scene."
             continue
         fi
@@ -50,7 +50,7 @@ if [ "$RUN_WARMUP" = true ]; then
     conda activate restDiff
 
     for SCENE in "${SCENES[@]}"; do
-        YAML_PATH="configs/${SCENE}.yaml"
+        YAML_PATH="configs/dataset/${SCENE}.yaml"
         
         # Check if config exists before reading floors
         if [ ! -f "$YAML_PATH" ]; then
@@ -67,7 +67,7 @@ if [ "$RUN_WARMUP" = true ]; then
         # Inner loop to iterate over each floor in the scene
         for FLOOR in $FLOORS; do
             # Update data path to point to the specific floor directory generated in Phase 1
-            DATA_PATH="data/${SCENE}/${FLOOR}"
+            DATA_PATH="data/dataset/${SCENE}/${FLOOR}"
             
             echo " -> [STAGE 2] Executing Geometrical Warmup: ${SCENE} | Floor: ${FLOOR} (Version: ${VERSION})"
             

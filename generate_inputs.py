@@ -24,7 +24,7 @@ def main(cfg):
         output_path = Path(cfg.output_path) / cfg.scene_name / str(floor)
         
         generator = Generator(cfg.env_id, floor, output_path)
-        generator.run(cfg.img_size, cfg.dist_thresh, cfg.rot_thresh, cfg.blur_thresh, cfg.step)
+        generator.run(cfg.crop_images, cfg.img_size, cfg.dist_thresh, cfg.rot_thresh, cfg.blur_thresh, cfg.step)
 
 if __name__ == "__main__":
     args = argparse.ArgumentParser()

@@ -6,6 +6,7 @@ _C = CN()
 
 # Project level configuration
 _C.scene_name = "6VSV7_695"  # No spaces
+_C.crop_images = False
 _C.img_size = 512
 
 # Output paths

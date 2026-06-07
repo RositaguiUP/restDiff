@@ -47,9 +47,10 @@ class Generator:
         h, w = rgb.shape[:2]
         size = min(h, w)
         start_x, start_y = (w - size) // 2, (h - size) // 2
-        rgb = cv2.resize(rgb[start_y:start_y+size, start_x:start_x+size], (img_size, img_size))
-        depth = cv2.resize(depth[start_y:start_y+size, start_x:start_x+size], (img_size, img_size), interpolation=cv2.INTER_NEAREST)
-        return rgb, depth
+        # Default: crop to square and resize
+        rgb_cropped = cv2.resize(rgb[start_y:start_y+size, start_x:start_x+size], (img_size, img_size))
+        depth_cropped = cv2.resize(depth[start_y:start_y+size, start_x:start_x+size], (img_size, img_size), interpolation=cv2.INTER_NEAREST)
+        return rgb_cropped, depth_cropped
     
     def _save_depth_visualization(self, idx, depth, depth_path):
         depth_vis = depth / (depth.max() + 1e-6)
@@ -69,7 +70,7 @@ class Generator:
         else:
             print(f"Warning: Original point cloud not found at {path_org_pcd}")
 
-    def run(self, img_size=512, dist_thresh=0.15, rot_thresh=10.0, blur_thresh=15.0, step=1):
+    def run(self, crop=True, img_size=512, dist_thresh=0.15, rot_thresh=10.0, blur_thresh=15.0, step=1):        
         # --- STEP 1: FILTERING & SCAN EXTRACTION ---
         print("[bold blue]Starting Step 1: Filtering & Extraction...[/bold blue]")
         # deblurrer = MotionDeblurer()
@@ -105,14 +106,14 @@ class Generator:
         # --- STEP 2: Processing ---
         print("[bold blue]Starting Step 2: Processing...[/bold blue]")
         
-        # Prepare for final JSON
+        # Prepare for final JSON -- will be filled from first processed frame
         json_data = {
             "camera_model": "OPENCV",
-            "fl_x": img_size, "fl_y": img_size, # Simplified focal
-            "cx": img_size/2, "cy": img_size/2,
-            "w": img_size, "h": img_size,
+            "w": None, "h": None,
             "frames": []
         }
+        first_w = None
+        first_h = None
         
         for frame in tqdm(selected_frames, desc="Processing Frames"):
             idx = frame["id"]
@@ -121,29 +122,69 @@ class Generator:
             # rgb_clean = deblurrer.process(frame["view"]["img"])
             rgb_clean = frame["view"]["img"]
             depth_m = frame["view"]["depth"].astype(np.float32) / 1000.0
-            rgb_f, scan_depth_f = self._preprocess_data(rgb_clean, depth_m, img_size)
+
+            # If cropping/resizing is enabled, use _preprocess_data. Otherwise keep original sizes (only ensure depth matches rgb)
+            if crop:
+                rgb_f, scan_depth_f = self._preprocess_data(rgb_clean, depth_m, img_size)
+                out_h, out_w = img_size, img_size
+            else:
+                # Resize depth to match rgb resolution, but keep rgb as-is
+                scan_depth_f = cv2.resize(depth_m, (rgb_clean.shape[1], rgb_clean.shape[0]), interpolation=cv2.INTER_NEAREST)
+                rgb_f = rgb_clean
+                out_h, out_w = rgb_f.shape[:2]
             
             # Save Scan Data
             cv2.imwrite(str(self.rgb_dir / f"{idx:05d}.png"), cv2.cvtColor(rgb_f, cv2.COLOR_RGB2BGR))
             np.save(self.depth_dir / f"{idx:05d}.npy", scan_depth_f)
-            self._save_depth_visualization(idx, scan_depth_f, self.depth_dir)
+            # self._save_depth_visualization(idx, scan_depth_f, self.depth_dir)
 
             # Update JSON
             # Convert W2C Scan to C2W (it is in OpenCV format)
             w2c_scan = frame["view"]["viewmat"]
-            # gl_transform = np.array([[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]])
-            # c2w_gl = np.linalg.inv(gl_transform @ w2c_scan)
-            c2w_gl = np.linalg.inv(w2c_scan)
-            
-            json_data["frames"].append({
+            c2w_cv = np.linalg.inv(w2c_scan)
+            # Set intrinsics from first processed frame
+            K_frame = frame["view"].get("K")
+            fx_frame = float(frame["view"].get("fx"))
+            fy_frame = float(frame["view"].get("fy"))
+            cx_frame = float(frame["view"].get("cx"))
+            cy_frame = float(frame["view"].get("cy"))
+            w_frame = int(frame["view"].get("width") or out_w)
+            h_frame = int(frame["view"].get("height") or out_h)
+
+            if first_w is None:
+                first_w = w_frame
+                first_h = h_frame
+                # populate top-level json_data image size from first frame
+                json_data["w"] = out_w
+                json_data["h"] = out_h
+            else:
+                if w_frame != first_w or h_frame != first_h:
+                    print(f"!WARNING! Frame size for frame {idx} ({w_frame},{h_frame}) differs from first frame ({first_w},{first_h}). Using first frame values in metadata.")
+
+            # Build per-frame intrinsics to store with this frame
+            if K_frame is not None:
+                K_list = np.array(K_frame).tolist()
+            else:
+                K_list = [[fx_frame, 0.0, cx_frame], [0.0, fy_frame, cy_frame], [0.0, 0.0, 1.0]]
+
+            frame_entry = {
                 "id": idx,
                 "blurry_score": frame["score"],
                 "file_path": f"rgb/{idx:05d}.png",
                 "depth_file_path": f"depth/{idx:05d}.npy",
-                "transform_matrix": c2w_gl.tolist()
-            })
+                "pose": c2w_cv.tolist(),
+                "K": K_list,
+                "fl_x": fx_frame,
+                "fl_y": fy_frame,
+                "cx": cx_frame,
+                "cy": cy_frame,
+                "w": out_w,
+                "h": out_h,
+            }
+
+            json_data["frames"].append(frame_entry)
             
-        with open(self.output_path / "transforms.json", "w") as f:
+        with open(self.output_path / "poses.json", "w") as f:
             json.dump(json_data, f, indent=4)
         
         self._copy_pointcloud()
