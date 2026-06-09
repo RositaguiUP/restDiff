@@ -26,6 +26,7 @@ def main():
     parser.add_argument("--test-every", type=int, default=8, help="Test split slice interval")
     parser.add_argument("--max-visualizations", type=int, default=None, help="Max random frames to sample and plot per run")
     parser.add_argument("--device", default="cuda", help="Computation target device")
+    parser.add_argument("--rot_k", type=int, default=-1, help="Number of 90-degree rotations for portrait images. -1 = 90deg CW, 1 = 90deg CCW")
     
     args = parser.parse_args()
     device = args.device
@@ -144,6 +145,15 @@ def main():
                     # Extract ground truth from dataset tensors (no redundant PIL/numpy file reads)
                     target_rgb = data["image"].cpu().numpy()
                     target_depth = data["depth"].cpu().numpy()
+                    
+                    # Handle Portrait Rotation
+                    orientation = frame_meta.get("orientation", "landscape")
+                    if orientation == "portrait":
+                        # Rotate the numpy arrays so they plot upright
+                        target_rgb = np.rot90(target_rgb, k=args.rot_k, axes=(0, 1))
+                        rendered_rgb = np.rot90(rendered_rgb, k=args.rot_k, axes=(0, 1))
+                        target_depth = np.rot90(target_depth, k=args.rot_k)
+                        rendered_depth = np.rot90(rendered_depth, k=args.rot_k)
                     
                     # Construct 2x2 visual breakdown matrix
                     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
