@@ -86,4 +86,4 @@ if __name__ == "__main__":
 # python cleanup_folders.py --stage warmup --folder comparisons --dry-run
 
 # python cleanup_folders.py --stage warmup --version v6.0 --target checkpoints/ckpt_warmup_latest.pt --dry-run
-# python cleanup_folders.py --stage warmup --version v6.0 --target wandb --dry-run
+# python cleanup_folders.py --stage warmup --version v6.0 --target wandb --results-dir ./results/dataset --dry-run 

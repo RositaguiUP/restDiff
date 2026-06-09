@@ -15,8 +15,8 @@ from diffusers import StableDiffusionControlNetPipeline, UniPCMultistepScheduler
 from diffusers import AutoencoderKL, UNet2DConditionModel, DDPMScheduler, ControlNetModel
 from transformers import CLIPTextModel, CLIPTokenizer
 
-from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, LearnedPerceptualImagePatchSimilarity
+# from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 # ==========================================
 # CONFIGURATION 
@@ -31,8 +31,8 @@ JSON_FILE = "finetune_meta_all_b40.json"
 FINAL_DIR = "./finetuned_models/"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-BATCH_SIZE = 2
-GRADIENT_ACCUMULATION_STEPS = 4 
+BATCH_SIZE = 4
+GRADIENT_ACCUMULATION_STEPS = 2
 LEARNING_RATE = 1e-5 
 EPOCHS = 15 if not DEBUG_MODE else 2 # Run only 2 epochs in debug mode
 VAL_SPLIT_RATIO = 0.10 
@@ -48,19 +48,28 @@ psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(DEVICE)
 ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
 lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(DEVICE)
 
-def run_visual_validation(epoch, global_step, val_dataloader, vae, text_encoder, tokenizer, unet, controlnet_tile, noise_scheduler, device):
+def run_visual_validation(epoch, val_dataset, vae, text_encoder, tokenizer, unet, controlnet_tile, noise_scheduler, device):
     print(f"\n[+] Executing Epoch {epoch} Evaluation Grid & Metrics...")
     
-    # Initialize metrics 
-    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
-    ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
+    # psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
+    # ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    # lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
 
-    # 1. Grab a fixed batch of images from the Dataloader
-    val_iterator = iter(val_dataloader)
-    batch = next(val_iterator) 
+    # 1. Grab exactly 5 fixed samples from the dataset
+    num_eval_images = min(5, len(val_dataset))
+    cond_imgs = []
+    texts = []
+    pixel_values_list = []
     
-    # 2. Generate the enhanced images
+    for i in range(num_eval_images):
+        sample = val_dataset[i]
+        cond_imgs.append(transforms.ToPILImage()(sample["cond_tile"]))
+        texts.append(sample["text"])
+        pixel_values_list.append(sample["pixel_values"])
+        
+    gt_tensors_unnorm = torch.stack(pixel_values_list).to(device) * 0.5 + 0.5
+
+    # 2. Setup Pipeline
     val_pipe = StableDiffusionControlNetPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
         controlnet=controlnet_tile, 
@@ -69,44 +78,41 @@ def run_visual_validation(epoch, global_step, val_dataloader, vae, text_encoder,
     ).to(device)
     val_pipe.set_progress_bar_config(disable=True)
 
+    # 3. FAST BATCHED INFERENCE 
     with torch.no_grad(), torch.autocast("cuda"):
-        # Convert batch tensors to PIL Images for the pipeline
-        cond_imgs = [transforms.ToPILImage()(img) for img in batch["cond_tile"]]
-        
         pred_imgs = val_pipe(
-            prompt=batch["text"],
-            image=cond_imgs,
+            prompt=texts,          
+            image=cond_imgs,       
             num_inference_steps=20,
             guidance_scale=7.0
         ).images
 
-    # 3. Calculate Advanced Metrics
+    # 4. Calculate Advanced Metrics on the entire Batch
     pred_tensors = torch.stack([transforms.ToTensor()(img) for img in pred_imgs]).to(device)
-    gt_tensors_unnorm = batch["pixel_values"].to(device) * 0.5 + 0.5 
 
     psnr_val = psnr_metric(pred_tensors, gt_tensors_unnorm)
-    ssim_val = ssim_metric(pred_tensors.unsqueeze(1) if pred_tensors.ndim == 3 else pred_tensors, 
-                           gt_tensors_unnorm.unsqueeze(1) if gt_tensors_unnorm.ndim == 3 else gt_tensors_unnorm)
-    
-    # LPIPS expects inputs in range [-1, 1]
+    ssim_val = ssim_metric(
+        pred_tensors.unsqueeze(1) if pred_tensors.ndim == 3 else pred_tensors, 
+        gt_tensors_unnorm.unsqueeze(1) if gt_tensors_unnorm.ndim == 3 else gt_tensors_unnorm
+    )
     lpips_val = lpips_metric(pred_tensors * 2.0 - 1.0, gt_tensors_unnorm * 2.0 - 1.0)
 
-    # 4. Create the Visual Grid for WandB
+    # 5. Create the Visual Grid for WandB
     log_images = []
-    for i in range(len(pred_imgs)):
+    for i in range(num_eval_images):
         gt_img = transforms.ToPILImage()(gt_tensors_unnorm[i].cpu())
         log_images.append(wandb.Image(cond_imgs[i], caption=f"Sample {i}: 3DGS Render"))
         log_images.append(wandb.Image(pred_imgs[i], caption=f"Sample {i}: Enhanced"))
         log_images.append(wandb.Image(gt_img, caption=f"Sample {i}: GT Scan"))
 
-    # Log everything
+    # Log EVERYTHING strictly against the epoch!
     wandb.log({
-        "Eval/PSNR (Higher=Better)": psnr_val.item(),
-        "Eval/SSIM (Structure Preserved)": ssim_val.item(),
-        "Eval/LPIPS (Photorealism, Lower=Better)": lpips_val.item(),
-        "Validation Grid": log_images,
+        "Validation/PSNR": psnr_val.item(),
+        "Validation/SSIM": ssim_val.item(),
+        "Validation/LPIPS": lpips_val.item(),
+        "Visualization/Validation Grid": log_images,
         "epoch": epoch
-    }, step=global_step)
+    })
     
     del val_pipe
     torch.cuda.empty_cache()
@@ -179,7 +185,33 @@ train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 run_name = f"run_{MODE}_b{BATCH_SIZE}_DEBUG" if DEBUG_MODE else f"run_{MODE}_b{BATCH_SIZE}"
-wandb.init(project="thesis-gs-diffusion", name=run_name, dir=BASE_DIR)
+
+# Restored and Upgraded Config Tracking!
+wandb.init(
+    project="thesis-gs-diffusion", 
+    name=run_name, 
+    dir=BASE_DIR,
+    config={
+        "debug_mode": DEBUG_MODE,
+        "mode": MODE,
+        "base_model": BASE_MODEL,
+        "batch_size": BATCH_SIZE,
+        "gradient_accumulation_steps": GRADIENT_ACCUMULATION_STEPS,
+        "effective_batch_size": BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS,
+        "learning_rate": LEARNING_RATE,
+        "epochs": EPOCHS,
+        "train_size": len(train_data),
+        "val_size": len(val_data),
+        "json_file": JSON_FILE,
+        "prompt_dropout_rate": PROMPT_DROPOUT_RATE
+    }
+)
+wandb.define_metric("global_step")
+wandb.define_metric("epoch")
+
+wandb.define_metric("train_loss", step_metric="global_step")
+wandb.define_metric("Validation/*", step_metric="epoch")
+wandb.define_metric("Visualization/*", step_metric="epoch")
 
 # ==========================================
 # 3. INITIALIZE MODELS 
@@ -209,6 +241,9 @@ for epoch in range(EPOCHS):
     
     optimizer.zero_grad()
     
+    epoch_train_loss = 0.0
+    num_batches = 0
+    
     for step, batch in enumerate(progress_bar):
         latents = vae.encode(batch["pixel_values"].to(DEVICE)).latent_dist.sample() * vae.config.scaling_factor
         noise = torch.randn_like(latents)
@@ -228,16 +263,23 @@ for epoch in range(EPOCHS):
         loss = loss / GRADIENT_ACCUMULATION_STEPS 
         loss.backward()
         
+        current_loss = loss.item() * GRADIENT_ACCUMULATION_STEPS
+        epoch_train_loss += current_loss
+        num_batches += 1
+        
         if (step + 1) % GRADIENT_ACCUMULATION_STEPS == 0:
             optimizer.step()
             optimizer.zero_grad()
-        
-        wandb.log({"train_loss": loss.item() * GRADIENT_ACCUMULATION_STEPS, "epoch": epoch + 1}, step=global_step)
+            
+        wandb.log({
+            "train_loss": loss.item() * GRADIENT_ACCUMULATION_STEPS, 
+            "global_step": global_step
+        })
         progress_bar.set_postfix({"loss": f"{loss.item() * GRADIENT_ACCUMULATION_STEPS:.4f}"})
         global_step += 1
 
-    # Validation & Model Checkpointing
-    run_visual_validation(epoch + 1, global_step, val_dataloader, vae, text_encoder, tokenizer, unet, controlnet_tile, noise_scheduler, DEVICE)
+    # Trigger Validation & Log Everything to WandB at step=epoch
+    run_visual_validation(epoch + 1, val_dataset, vae, text_encoder, tokenizer, unet, controlnet_tile, noise_scheduler, DEVICE)
     
     epoch_dir = f"controlnet_epoch_{epoch+1}_DEBUG" if DEBUG_MODE else f"controlnet_epoch_{epoch+1}"
     controlnet_tile.save_pretrained(os.path.join(FINAL_DIR, epoch_dir, "tile"))
