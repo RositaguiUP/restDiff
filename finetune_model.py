@@ -2,6 +2,7 @@ import gc
 import os
 import json
 import random
+import warnings
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -18,12 +19,16 @@ from transformers import CLIPTextModel, CLIPTokenizer
 from torchmetrics.image import PeakSignalNoiseRatio, StructuralSimilarityIndexMeasure, LearnedPerceptualImagePatchSimilarity
 # from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
+# Suppress verbose warnings from libraries
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 # ==========================================
 # CONFIGURATION 
 # ==========================================
 DEBUG_MODE = False  # <--- SET TO FALSE WHEN YOU ARE READY FOR THE REAL RUN
 
-MODE = "tile_only" # Options: "tile_only" or "multi_controlnet"
+MODE = "multi_controlnet" # Options: "tile_only" or "multi_controlnet"
 # BASE_MODEL = "SG161222/Realistic_Vision_V5.1_noVAE" 
 BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 BASE_DIR = "./dataset/warmup/v6.0/29999/"
@@ -31,10 +36,10 @@ JSON_FILE = "finetune_meta_all_b40.json"
 FINAL_DIR = "./finetuned_models/"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-BATCH_SIZE = 4
-GRADIENT_ACCUMULATION_STEPS = 2
+BATCH_SIZE = 2
+GRADIENT_ACCUMULATION_STEPS = 4
 LEARNING_RATE = 1e-5 
-EPOCHS = 15 if not DEBUG_MODE else 2 # Run only 2 epochs in debug mode
+EPOCHS = 10 if not DEBUG_MODE else 2 # Run only 2 epochs in debug mode
 VAL_SPLIT_RATIO = 0.10 
 PROMPT_DROPOUT_RATE = 0.20 
 SEED = 42
@@ -48,31 +53,37 @@ psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(DEVICE)
 ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(DEVICE)
 lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(DEVICE)
 
-def run_visual_validation(epoch, val_dataset, vae, text_encoder, tokenizer, unet, controlnet_tile, noise_scheduler, device):
+def run_visual_validation(epoch, val_dataset, vae, text_encoder, tokenizer, unet, controlnet_tile, controlnet_depth, noise_scheduler, device, mode):
     print(f"\n[+] Executing Epoch {epoch} Evaluation Grid & Metrics...")
-    
-    # psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
-    # ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
-    # lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
 
     # 1. Grab exactly 5 fixed samples from the dataset
     num_eval_images = min(5, len(val_dataset))
     cond_imgs = []
+    depth_imgs = []
     texts = []
     pixel_values_list = []
     
     for i in range(num_eval_images):
         sample = val_dataset[i]
         cond_imgs.append(transforms.ToPILImage()(sample["cond_tile"]))
+        if mode == "multi_controlnet":
+            depth_imgs.append(transforms.ToPILImage()(sample["cond_depth"]))
         texts.append(sample["text"])
         pixel_values_list.append(sample["pixel_values"])
         
     gt_tensors_unnorm = torch.stack(pixel_values_list).to(device) * 0.5 + 0.5
 
-    # 2. Setup Pipeline
+    # 2. Setup Pipeline inputs dynamically based on mode
+    if mode == "multi_controlnet":
+        cnet_models = [controlnet_tile, controlnet_depth]
+        cnet_images = [[cond_imgs[j], depth_imgs[j]] for j in range(num_eval_images)]
+    else:
+        cnet_models = controlnet_tile
+        cnet_images = cond_imgs
+
     val_pipe = StableDiffusionControlNetPipeline(
         vae=vae, text_encoder=text_encoder, tokenizer=tokenizer, unet=unet,
-        controlnet=controlnet_tile, 
+        controlnet=cnet_models, 
         scheduler=UniPCMultistepScheduler.from_config(noise_scheduler.config),
         safety_checker=None, feature_extractor=None
     ).to(device)
@@ -82,7 +93,7 @@ def run_visual_validation(epoch, val_dataset, vae, text_encoder, tokenizer, unet
     with torch.no_grad(), torch.autocast("cuda"):
         pred_imgs = val_pipe(
             prompt=texts,          
-            image=cond_imgs,       
+            image=cnet_images,       
             num_inference_steps=20,
             guidance_scale=7.0
         ).images
@@ -102,10 +113,12 @@ def run_visual_validation(epoch, val_dataset, vae, text_encoder, tokenizer, unet
     for i in range(num_eval_images):
         gt_img = transforms.ToPILImage()(gt_tensors_unnorm[i].cpu())
         log_images.append(wandb.Image(cond_imgs[i], caption=f"Sample {i}: 3DGS Render"))
+        if mode == "multi_controlnet":
+            log_images.append(wandb.Image(depth_imgs[i], caption=f"Sample {i}: GT Depth"))
         log_images.append(wandb.Image(pred_imgs[i], caption=f"Sample {i}: Enhanced"))
         log_images.append(wandb.Image(gt_img, caption=f"Sample {i}: GT Scan"))
 
-    # Log EVERYTHING strictly against the epoch!
+    # Notice: NO step=epoch. We let WandB increment naturally, but chart against the "epoch" metric below.
     wandb.log({
         "Validation/PSNR": psnr_val.item(),
         "Validation/SSIM": ssim_val.item(),
@@ -122,23 +135,32 @@ def run_visual_validation(epoch, val_dataset, vae, text_encoder, tokenizer, unet
 # 1. CUSTOM DATASET CLASS
 # ==========================================
 class ScanCompletionDataset(Dataset):
-    def __init__(self, data_list, target_size=(512, 512), is_train=False):
+    def __init__(self, data_list, mode, target_size=(512, 512), is_train=False):
         self.items = data_list
+        self.mode = mode
         self.target_size = target_size
         self.is_train = is_train
         self.base_prompt = "photorealistic, sharp, highly detailed indoor architecture, clear edges, 4k texture"
         
     def __len__(self): return len(self.items)
 
+    def _process_npy_depth(self, npy_path):
+        depth_array = np.load(npy_path)
+        depth_array = np.nan_to_num(depth_array)
+        d_min, d_max = depth_array.min(), depth_array.max()
+        depth_norm = (depth_array - d_min) / (d_max - d_min) if d_max > d_min else np.zeros_like(depth_array)
+        depth_uint8 = (depth_norm * 255).astype(np.uint8)
+        return Image.fromarray(depth_uint8).convert("RGB")
+
     def __getitem__(self, idx):
         item = self.items[idx]
         gt_rgb = Image.open(item["gt_rgb_path"]).convert("RGB")
         render_rgb = Image.open(item["render_rgb_path"]).convert("RGB")
         
-        # --- DATA AUGMENTATION ---
-        # 50% chance to flip images left-to-right. 
-        # MUST happen to both identically so ControlNet geometry matches!
-        if self.is_train and random.random() > 0.5:
+        # Determine if we should flip this specific frame
+        flip = self.is_train and random.random() > 0.5
+        
+        if flip:
             gt_rgb = gt_rgb.transpose(Image.FLIP_LEFT_RIGHT)
             render_rgb = render_rgb.transpose(Image.FLIP_LEFT_RIGHT)
             
@@ -153,12 +175,18 @@ class ScanCompletionDataset(Dataset):
             transforms.ToTensor()
         ])(render_rgb)
         
-        # --- PROMPT DROPOUT (EXPERT 2) ---
-        prompt = self.base_prompt
-        if self.is_train and random.random() < PROMPT_DROPOUT_RATE:
-            prompt = ""
-            
+        prompt = self.base_prompt if not (self.is_train and random.random() < PROMPT_DROPOUT_RATE) else ""
         batch = {"pixel_values": gt_tensor, "cond_tile": cond_tensor, "text": prompt}
+        
+        if self.mode == "multi_controlnet":
+            render_depth_img = self._process_npy_depth(item["render_depth_path"])
+            if flip:
+                render_depth_img = render_depth_img.transpose(Image.FLIP_LEFT_RIGHT)
+            batch["cond_depth"] = transforms.Compose([
+                transforms.Resize(self.target_size),
+                transforms.ToTensor()
+            ])(render_depth_img)
+            
         return batch
 
 # ==========================================
@@ -167,7 +195,6 @@ class ScanCompletionDataset(Dataset):
 with open(BASE_DIR + JSON_FILE, "r") as f: 
     full_data = json.load(f)
 
-# --- DEBUG MODE INJECTION ---
 if DEBUG_MODE:
     print("\n[!!!] DEBUG MODE IS ACTIVE [!!!]")
     print("[!] Slicing dataset to only 20 images for a rapid test run.")
@@ -178,15 +205,14 @@ split_idx = int(len(full_data) * (1 - VAL_SPLIT_RATIO))
 train_data = full_data[:split_idx]
 val_data = full_data[split_idx:]
 
-train_dataset = ScanCompletionDataset(train_data, is_train=True)
-val_dataset = ScanCompletionDataset(val_data, is_train=False)
+train_dataset = ScanCompletionDataset(train_data, mode=MODE, is_train=True)
+val_dataset = ScanCompletionDataset(val_data, mode=MODE, is_train=False)
 
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
 run_name = f"run_{MODE}_b{BATCH_SIZE}_DEBUG" if DEBUG_MODE else f"run_{MODE}_b{BATCH_SIZE}"
 
-# Restored and Upgraded Config Tracking!
 wandb.init(
     project="thesis-gs-diffusion", 
     name=run_name, 
@@ -197,7 +223,6 @@ wandb.init(
         "base_model": BASE_MODEL,
         "batch_size": BATCH_SIZE,
         "gradient_accumulation_steps": GRADIENT_ACCUMULATION_STEPS,
-        "effective_batch_size": BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS,
         "learning_rate": LEARNING_RATE,
         "epochs": EPOCHS,
         "train_size": len(train_data),
@@ -229,7 +254,18 @@ unet.requires_grad_(False)
 
 controlnet_tile = ControlNetModel.from_pretrained("lllyasviel/control_v11f1e_sd15_tile").to(DEVICE)
 controlnet_tile.train()
-optimizer = torch.optim.AdamW(controlnet_tile.parameters(), lr=LEARNING_RATE)
+
+# Multi-ControlNet initialization logic
+params_to_optimize = list(controlnet_tile.parameters())
+
+if MODE == "multi_controlnet":
+    controlnet_depth = ControlNetModel.from_pretrained("lllyasviel/control_v11f1p_sd15_depth").to(DEVICE)
+    controlnet_depth.train()
+    params_to_optimize += list(controlnet_depth.parameters())
+else:
+    controlnet_depth = None
+
+optimizer = torch.optim.AdamW(params_to_optimize, lr=LEARNING_RATE)
 
 # ==========================================
 # 4. TRAINING LOOP
@@ -237,6 +273,8 @@ optimizer = torch.optim.AdamW(controlnet_tile.parameters(), lr=LEARNING_RATE)
 global_step = 0
 for epoch in range(EPOCHS):
     controlnet_tile.train()
+    if MODE == "multi_controlnet": controlnet_depth.train()
+        
     progress_bar = tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{EPOCHS} [Train]")
     
     optimizer.zero_grad()
@@ -254,7 +292,16 @@ for epoch in range(EPOCHS):
         encoder_hidden_states = text_encoder(text_inputs.input_ids)[0]
         
         cond_tile = batch["cond_tile"].to(DEVICE)
-        down_block_res, mid_block_res = controlnet_tile(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states, controlnet_cond=cond_tile, return_dict=False)
+        
+        # Multi-ControlNet math processing
+        if MODE == "multi_controlnet":
+            cond_depth = batch["cond_depth"].to(DEVICE)
+            down_tile, mid_tile = controlnet_tile(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states, controlnet_cond=cond_tile, return_dict=False)
+            down_depth, mid_depth = controlnet_depth(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states, controlnet_cond=cond_depth, return_dict=False)
+            down_block_res = [t + d for t, d in zip(down_tile, down_depth)]
+            mid_block_res = mid_tile + mid_depth
+        else:
+            down_block_res, mid_block_res = controlnet_tile(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states, controlnet_cond=cond_tile, return_dict=False)
             
         noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states,
                           down_block_additional_residuals=down_block_res, mid_block_additional_residual=mid_block_res, return_dict=False)[0]
@@ -278,13 +325,19 @@ for epoch in range(EPOCHS):
         progress_bar.set_postfix({"loss": f"{loss.item() * GRADIENT_ACCUMULATION_STEPS:.4f}"})
         global_step += 1
 
-    # Trigger Validation & Log Everything to WandB at step=epoch
-    run_visual_validation(epoch + 1, val_dataset, vae, text_encoder, tokenizer, unet, controlnet_tile, noise_scheduler, DEVICE)
+    # Validation
+    run_visual_validation(epoch + 1, val_dataset, vae, text_encoder, tokenizer, unet, controlnet_tile, controlnet_depth, noise_scheduler, DEVICE, MODE)
     
+    # Save checkpoints dynamically based on mode
     epoch_dir = f"controlnet_epoch_{epoch+1}_DEBUG" if DEBUG_MODE else f"controlnet_epoch_{epoch+1}"
     controlnet_tile.save_pretrained(os.path.join(FINAL_DIR, epoch_dir, "tile"))
+    if MODE == "multi_controlnet":
+        controlnet_depth.save_pretrained(os.path.join(FINAL_DIR, epoch_dir, "depth"))
 
-final_name = "final_tile_DEBUG" if DEBUG_MODE else "final_tile"
-controlnet_tile.save_pretrained(os.path.join(FINAL_DIR, final_name))
+final_name = "final_DEBUG" if DEBUG_MODE else "final"
+controlnet_tile.save_pretrained(os.path.join(FINAL_DIR, final_name, "tile"))
+if MODE == "multi_controlnet":
+    controlnet_depth.save_pretrained(os.path.join(FINAL_DIR, final_name, "depth"))
+    
 wandb.finish()
 print("\n[+] Pipeline execution completed successfully!")
