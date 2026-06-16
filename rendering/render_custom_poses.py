@@ -7,8 +7,14 @@ from tqdm import tqdm
 from gsplat.rendering import rasterization
 
 @torch.no_grad()
-def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", rot_k=-1):
-    os.makedirs(output_dir, exist_ok=True)
+def render_custom_poses(ckpt_path, poses_json_path, output_dir, render_depth=False, device="cuda", rot_k=-1):
+    rgb_dir = os.path.join(output_dir, "rgb")
+    os.makedirs(rgb_dir, exist_ok=True)
+
+    depth_dir = None
+    if render_depth:
+        depth_dir = os.path.join(output_dir, "depth")
+        os.makedirs(depth_dir, exist_ok=True)
     
     # Load Splats
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
@@ -58,7 +64,7 @@ def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", r
                 device=device
             ).unsqueeze(0)
         
-        render_colors, _, _ = rasterization(
+        render_outputs, _, _ = rasterization(
             means=splats["means"],
             quats=splats["quats"],
             scales=torch.exp(splats["scales"]),
@@ -70,20 +76,34 @@ def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", r
             height=H,
             sh_degree=3,
             packed=False,
-            render_mode="RGB"
+            render_mode="RGB+ED" if render_depth else "RGB",
         )
         
-        render_outputs = render_colors.squeeze(0)
-        rendered_rgb = torch.clamp(render_outputs[..., :3], 0.0, 1.0).cpu().numpy()
-        rendered_rgb_uint8 = (rendered_rgb * 255).astype(np.uint8)
+        render_outputs = render_outputs.squeeze(0)
+        rendered_rgb = render_outputs[..., :3]
         
-        # Check orientation and apply rotation if it's a portrait image
-        if frame.get("orientation", "landscape") == "portrait":
-            # rot_k=-1 rotates 90 degrees clockwise. rot_k=1 is counter-clockwise.
-            rendered_rgb_uint8 = np.rot90(rendered_rgb_uint8, k=rot_k)
+        portrait = frame.get("orientation", "landscape") == "portrait"
+        name = f"{idx:05d}" if isinstance(idx, int) else str(idx)
+        
+        
+        if portrait:
+            rendered_rgb = torch.rot90(rendered_rgb, k=rot_k)
 
-        Image.fromarray(rendered_rgb_uint8).save(os.path.join(output_dir, f"{idx}.png"))
+        img = torch.clamp(rendered_rgb, 0.0, 1.0).cpu().numpy()
+        img_uint8 = (img * 255).astype(np.uint8)
         
+        Image.fromarray(img_uint8).save(
+            os.path.join(rgb_dir, f"{name}.png")
+        )
+        
+        if render_depth:
+            rendered_depth = render_outputs[..., 3]
+            
+            if portrait:
+                rendered_depth = torch.rot90(rendered_depth, k=rot_k)
+                
+            np.save(os.path.join(depth_dir, f"{name}.npy"), rendered_depth.cpu().numpy())
+                
     print(f"Rendering complete. Saved {len(meta['frames'])} images to {output_dir}")
         
 if __name__ == "__main__":
@@ -95,6 +115,7 @@ if __name__ == "__main__":
     parser.add_argument("--stage", type=str, required=True, help="Stage of training (e.g., fine)")
     parser.add_argument("--ckpt", type=str, required=True, help="Checkpoint identifier (e.g., 30000)")
     parser.add_argument("--poses_filename", type=str, required=True, help="Name of the poses JSON file without extension")
+    parser.add_argument("--render_depth", action="store_true", help="Also render depth maps")
     parser.add_argument("--rot_k", type=int, default=-1, help="Number of 90-degree rotations for portrait images. -1 = 90deg CW, 1 = 90deg CCW")
     args = parser.parse_args()
     
@@ -110,9 +131,9 @@ if __name__ == "__main__":
     print(f"Rotation k: {args.rot_k}")
     print(f"------------------------\n")
     
-    render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", rot_k=args.rot_k)
+    render_custom_poses(ckpt_path, poses_json_path, output_dir, render_depth=args.render_depth, device="cuda", rot_k=args.rot_k)
     
-# python rendering/render_custom_poses.py --scene 2F5Z7_007 --floor 0 --version v6.0 --stage warmup --ckpt 29999 --poses_filename poses_to_render/trajectory_inter_100 --rot_k 1
+# python rendering/render_custom_poses.py --scene 2F5Z7_007 --floor 0 --version v6.0 --stage warmup --ckpt 29999 --poses_filename poses_to_render/trajectory_inter_100 --render_depth --rot_k 1
 
 
 # results/2F5Z7_007/0/warmup/v6.0/checkpoints/ckpt_warmup_29999.pt
