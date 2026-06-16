@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # ==========================================
 DEBUG_MODE = False  # <--- SET TO FALSE WHEN YOU ARE READY FOR THE REAL RUN
 
-MODE = "multi" # Options: "tile" or "multi"
+MODE = "tile" # Options: "tile" or "multi"
 TRAIN_CONDITION = "gt"  # Options: "render" or "gt"
 DATASET_TYPE = "scan" # Options: "scan" or "dslr"
 BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
@@ -362,7 +362,7 @@ val_dataset = ScanCompletionDataset(val_data, mode=MODE, is_train=False)
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-run_name = f"{MODE}_{TRAIN_CONDITION}_{DATASET_TYPE}_b{BATCH_SIZE}_DEBUG" if DEBUG_MODE else f"{MODE}_{TRAIN_CONDITION}_{DATASET_TYPE}_b{BATCH_SIZE}"
+run_name = f"{MODE}_{TRAIN_CONDITION}_{DATASET_TYPE}_DEBUG" if DEBUG_MODE else f"{MODE}_{TRAIN_CONDITION}_{DATASET_TYPE}"
 
 FINAL_DIR = os.path.join(FINAL_DIR, run_name)
 os.makedirs(FINAL_DIR, exist_ok=True)
