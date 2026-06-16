@@ -22,7 +22,8 @@ def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", r
     global_H = int(meta.get("h", 0))
 
     print(f"Rendering {len(meta['frames'])} novel views...")
-    for idx, frame in enumerate(tqdm(meta["frames"])):
+    for frame in tqdm(meta["frames"]):
+        idx = frame["id"]
         c2w_cv = torch.tensor(frame["pose"], dtype=torch.float32, device=device)
         viewmats = torch.linalg.inv(c2w_cv).unsqueeze(0)
         
@@ -36,11 +37,26 @@ def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", r
         W = frame.get("w", global_W)
         H = frame.get("h", global_H)
         
-        K = torch.tensor([
-            [fl_x, 0, cx],
-            [0, fl_y, cy],
-            [0, 0, 1]
-        ], dtype=torch.float32, device=device).unsqueeze(0)
+        if "K" in frame:
+            K = torch.tensor(
+                frame["K"],
+                dtype=torch.float32,
+                device=device
+            )
+
+            if K.ndim == 2:
+                K = K.unsqueeze(0)
+
+        else:
+            K = torch.tensor(
+                [
+                    [fl_x, 0, cx],
+                    [0, fl_y, cy],
+                    [0, 0, 1]
+                ],
+                dtype=torch.float32,
+                device=device
+            ).unsqueeze(0)
         
         render_colors, _, _ = rasterization(
             means=splats["means"],
@@ -57,16 +73,18 @@ def render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", r
             render_mode="RGB"
         )
         
-        img = torch.clamp(render_colors.squeeze(0)[..., :3], 0.0, 1.0).cpu().numpy()
-        img_uint8 = (img * 255).astype(np.uint8)
+        render_outputs = render_colors.squeeze(0)
+        rendered_rgb = torch.clamp(render_outputs[..., :3], 0.0, 1.0).cpu().numpy()
+        rendered_rgb_uint8 = (rendered_rgb * 255).astype(np.uint8)
         
         # Check orientation and apply rotation if it's a portrait image
         if frame.get("orientation", "landscape") == "portrait":
             # rot_k=-1 rotates 90 degrees clockwise. rot_k=1 is counter-clockwise.
-            img_uint8 = np.rot90(img_uint8, k=rot_k)
+            rendered_rgb_uint8 = np.rot90(rendered_rgb_uint8, k=rot_k)
 
-        Image.fromarray(img_uint8).save(os.path.join(output_dir, f"render_{idx:04d}.png"))
+        Image.fromarray(rendered_rgb_uint8).save(os.path.join(output_dir, f"{idx}.png"))
         
+    print(f"Rendering complete. Saved {len(meta['frames'])} images to {output_dir}")
         
 if __name__ == "__main__":
     import argparse
@@ -82,7 +100,7 @@ if __name__ == "__main__":
     
     # Automatically construct paths based on the provided arguments
     ckpt_path = f"results/{args.scene}/{args.stage}/{args.version}/{args.floor}/checkpoints/ckpt_{args.stage}_{args.ckpt}.pt"
-    poses_json_path = f"data/{args.scene}/{args.floor}/poses_to_render/{args.poses_filename}.json"
+    poses_json_path = f"data/{args.scene}/{args.floor}/{args.poses_filename}.json"
     output_dir = f"results/{args.scene}/{args.stage}/{args.version}/{args.floor}/renders/{args.poses_filename}"
     
     print(f"--- Paths Configured ---")
@@ -94,7 +112,9 @@ if __name__ == "__main__":
     
     render_custom_poses(ckpt_path, poses_json_path, output_dir, device="cuda", rot_k=args.rot_k)
     
-# python rendering/render_custom_poses.py --scene 2F5Z7_007 --floor 0 --version v6.0 --stage warmup --ckpt 29999 --poses_filename trajectory_inter_15 --rot_k 1
+# python rendering/render_custom_poses.py --scene 2F5Z7_007 --floor 0 --version v6.0 --stage warmup --ckpt 29999 --poses_filename poses_to_render/trajectory_inter_100 --rot_k 1
+
+
 # results/2F5Z7_007/0/warmup/v6.0/checkpoints/ckpt_warmup_29999.pt
 # --poses_json data/2F5Z7_007/0/trajectory_inter_15.json --output_dir path/to/output/dir
 

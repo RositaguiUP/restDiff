@@ -70,3 +70,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     render_trajectory(args.ckpt, args.data_dir, args.output)
+    
+# python rendering/render_trajectory.py --ckpt results/2F5Z7_007/0/warmup/v6.0/checkpoints/ckpt_warmup_29999.pt --data_dir data/2F5Z7_007/0 --output results/2F5Z7_007/0/warmup/v6.0/renders/trajectory_interpolated/video.mp4

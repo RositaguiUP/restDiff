@@ -29,16 +29,18 @@ warnings.filterwarnings("ignore", category=UserWarning)
 DEBUG_MODE = False  # <--- SET TO FALSE WHEN YOU ARE READY FOR THE REAL RUN
 
 MODE = "multi" # Options: "tile" or "multi"
-TRAIN_CONDITION = "render"  # Options: "render" or "gt"
-# BASE_MODEL = "SG161222/Realistic_Vision_V5.1_noVAE" 
+TRAIN_CONDITION = "gt"  # Options: "render" or "gt"
+DATASET_TYPE = "scan" # Options: "scan" or "dslr"
 BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5"
-BASE_DIR = "./dataset/warmup/v6.0/29999/"
-JSON_FILE = "finetune_meta_all_b40.json"
 FINAL_DIR = "./finetuned_models/"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-BATCH_SIZE = 2
-GRADIENT_ACCUMULATION_STEPS = 4
+
+BASE_DIR = "./dataset/hd/warmup/v6.0/29999/" if DATASET_TYPE == "dslr" else "./dataset/warmup/v6.0/29999/"
+JSON_FILE = "finetune_meta_hd.json" if DATASET_TYPE == "dslr" else "finetune_meta_all_b40.json"
+
+BATCH_SIZE = 4 if MODE == "tile" else 2
+GRADIENT_ACCUMULATION_STEPS = 2 if MODE == "tile" else 4
 LEARNING_RATE = 1e-5 
 EPOCHS = 10 if not DEBUG_MODE else 2 # Run only 2 epochs in debug mode
 VAL_SPLIT_RATIO = 0.10 
@@ -360,9 +362,10 @@ val_dataset = ScanCompletionDataset(val_data, mode=MODE, is_train=False)
 train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 val_dataloader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-run_name = f"{MODE}_{TRAIN_CONDITION}_b{BATCH_SIZE}_DEBUG" if DEBUG_MODE else f"{MODE}_{TRAIN_CONDITION}_b{BATCH_SIZE}"
+run_name = f"{MODE}_{TRAIN_CONDITION}_{DATASET_TYPE}_b{BATCH_SIZE}_DEBUG" if DEBUG_MODE else f"{MODE}_{TRAIN_CONDITION}_{DATASET_TYPE}_b{BATCH_SIZE}"
 
-os.makedirs(FINAL_DIR + run_name, exist_ok=True)
+FINAL_DIR = os.path.join(FINAL_DIR, run_name)
+os.makedirs(FINAL_DIR, exist_ok=True)
 
 wandb.init(
     project="thesis-gs-diffusion", 
