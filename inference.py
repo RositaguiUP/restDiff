@@ -4,23 +4,24 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
-from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UniPCMultistepScheduler
+from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel, UniPCMultistepScheduler
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATIONhttps://wandb.ai/0225352-universidad-panamericana/thesis-gs-diffusion/workspace
 # ==========================================
-VERSION = "v0"
-EPOCH = 0
+VERSION = "v3"
+EPOCH = 9
 MODE = "tile_only" # Options: "tile_only" or "multi_controlnet"
+STRENGTH = 0.8 # ControlNet conditioning strength (1.0 is default, can be tuned)
 BASE_MODEL = "stable-diffusion-v1-5/stable-diffusion-v1-5" # Or your chosen base model
-CUSTOM_TILE_PATH = "lllyasviel/control_v11f1e_sd15_tile"
-CUSTOM_DEPTH_PATH = "lllyasviel/control_v11f1p_sd15_depth"
-# CUSTOM_TILE_PATH = f"/home/rosita/tests/diff/restDiff/finetuned_models/{VERSION}/specialized_controlnet_epoch_{EPOCH}/tile"
-# CUSTOM_DEPTH_PATH = f"/home/rosita/tests/diff/restDiff/finetuned_models/{VERSION}/specialized_controlnet_epoch_{EPOCH}/depth"
+# CUSTOM_TILE_PATH = "lllyasviel/control_v11f1e_sd15_tile"
+# CUSTOM_DEPTH_PATH = "lllyasviel/control_v11f1p_sd15_depth"
+CUSTOM_TILE_PATH = f"/home/rosita/tests/diff/restDiff/finetuned_models/{VERSION}/controlnet_epoch_{EPOCH}/tile"
+CUSTOM_DEPTH_PATH = f"/home/rosita/tests/diff/restDiff/finetuned_models/{VERSION}/controlnet_epoch_{EPOCH}/depth"
 
 INPUT_RENDER_RGB = "/home/rosita/tests/diff/restDiff/results/2F5Z7_007/warmup/v6.0/0/renders/render_0006.png"
 INPUT_RENDER_DEPTH = "/home/rosita/tests/diff/restDiff/results/2F5Z7_007/warmup/v6.0/0/renders/trajectory_inter_10/render_0005_depth.npy" # Only needed if multi_controlnet
-OUTPUT_PATH = f"/home/rosita/tests/diff/restDiff/results/2F5Z7_007/warmup/v6.0/0/predictions/trajectory_inter_10/prediction_0006_{VERSION}_e{EPOCH}.png"
+OUTPUT_PATH = f"/home/rosita/tests/diff/restDiff/results/2F5Z7_007/warmup/v6.0/0/predictions/trajectory_inter_10/prediction_0006_{VERSION}_e{EPOCH}_s{STRENGTH}.png"
 
 PROMPT = "photorealistic, highly detailed indoor, sharp textures, clean architecture"
 NEGATIVE_PROMPT = "blurry, artifacts, floating objects, people, distortion, deformed"
@@ -87,7 +88,7 @@ def save_comparison(original_img, refined_img, output_path):
     axes[1].axis("off")
     
     plt.tight_layout()
-    comparison_path = output_path.replace(".png", f"_comparison_{VERSION}_e{EPOCH}.png")
+    comparison_path = output_path.replace(".png", f"_comparison.png")
     plt.savefig(comparison_path)
     print(f"[*] Comparison plot saved to {comparison_path}")
     plt.close()
@@ -106,7 +107,7 @@ else:
     controlnets = controlnet_tile
 
 print(f"[+] Loading Base Pipeline ({BASE_MODEL})...")
-pipe = StableDiffusionControlNetPipeline.from_pretrained(
+pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
     BASE_MODEL,
     controlnet=controlnets,
     torch_dtype=torch.float16,
@@ -124,7 +125,7 @@ pipe.enable_xformers_memory_efficient_attention()
 render_rgb_pil = Image.open(INPUT_RENDER_RGB).convert("RGB")
 rgb_tensor = torch.from_numpy(np.array(render_rgb_pil)).float() / 255.0
 rgb_tensor = crop_and_resize_tensor(rgb_tensor, is_depth=False, target_size=512)
-render_rgb_img = Image.fromarray((rgb_tensor.numpy() * 255).astype(np.uint8))
+render_rgb_img = Image.fromarray((rgb_tensor.cpu().numpy().clip(0, 1) * 255).astype(np.uint8))
 
 if MODE == "multi_controlnet":
     render_depth_img = process_npy_depth(INPUT_RENDER_DEPTH)
@@ -148,9 +149,11 @@ result = pipe(
     prompt=PROMPT,
     negative_prompt=NEGATIVE_PROMPT,
     image=control_images,
+    control_image=control_images,
+    controlnet_conditioning_scale=controlnet_conditioning_scale,
+    strength=STRENGTH, # <-- means % noise is added to the render
     num_inference_steps=20, # 20-30 is usually plenty for UniPC
     guidance_scale=7.5, # How closely it follows the text prompt
-    controlnet_conditioning_scale=controlnet_conditioning_scale,
     generator=generator
 ).images[0]
 
